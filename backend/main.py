@@ -350,7 +350,7 @@ def migrate_legacy_database() -> None:
         "children": {"organization_id": "INTEGER"},
         "bus_trips": {"organization_id": "INTEGER"},
         "vehicle_safety_checks": {"organization_id": "INTEGER", "trip_id": "INTEGER"},
-        "notification_queue": {"organization_id": "INTEGER", "channel": "VARCHAR(30) DEFAULT 'webhook'", "provider_response": "TEXT", "sent_at": "DATETIME"},
+        "notification_queue": {"organization_id": "INTEGER", "channel": "VARCHAR(30) DEFAULT 'webhook'", "provider_response": "TEXT", "sent_at": "TIMESTAMP"},
     }
     tables = set(inspect(engine).get_table_names())
     with engine.begin() as connection:
