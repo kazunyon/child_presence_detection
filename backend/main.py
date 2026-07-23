@@ -10,7 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import DateTime, ForeignKey, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./mamoru_bus.db")
+raw_database_url = os.getenv("DATABASE_URL", "sqlite:///./mamoru_bus.db")
+# Render returns postgres:// or postgresql:// URLs. SQLAlchemy uses the psycopg v3 driver explicitly.
+DATABASE_URL = raw_database_url.replace("postgres://", "postgresql+psycopg://", 1).replace("postgresql://", "postgresql+psycopg://", 1)
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -284,6 +286,7 @@ def scan(data: ScanIn, db: Session = Depends(get_db)):
     event = SafetyEvent(child_id=child.id, event_type=data.event_type, staff_name=data.staff_name, latitude=data.latitude, longitude=data.longitude)
     db.add(event); db.commit(); db.refresh(event)
     return {"child": child.name, "event_id": event.id, "recorded_at": event.created_at}
+
 
 
 
