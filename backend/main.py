@@ -1,6 +1,7 @@
 """MAMORU BUS backend. Defaults to SQLite; set DATABASE_URL for PostgreSQL."""
 from datetime import datetime, timezone
 import os
+import hashlib
 from typing import Generator
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -21,6 +22,7 @@ class Staff(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
     role: Mapped[str] = mapped_column(String(40), default="職員")
+    pin_hash: Mapped[str] = mapped_column(String(64), default=lambda: hash_pin("0000"))
 
 class Vehicle(Base):
     __tablename__ = "vehicles"
@@ -69,12 +71,19 @@ class RouteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: str = Field(default="往路", max_length=20)
     vehicle_id: int | None = None
+class LoginIn(BaseModel):
+    staff_id: int
+    pin: str = Field(min_length=4, max_length=12)
 class ScanIn(BaseModel):
     qr_token: str
     event_type: str
+    staff_id: int
     staff_name: str
     latitude: str | None = None
     longitude: str | None = None
+
+def hash_pin(pin: str) -> str:
+    return hashlib.sha256(pin.encode("utf-8")).hexdigest()
 
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
@@ -83,7 +92,7 @@ def get_db() -> Generator[Session, None, None]:
 
 def seed(db: Session) -> None:
     if db.query(Staff).count() == 0:
-        db.add_all([Staff(name="田中 先生", role="運転担当"), Staff(name="佐藤 先生", role="第三者確認")])
+        db.add_all([Staff(name="田中 先生", role="運転担当", pin_hash=hash_pin("1234")), Staff(name="佐藤 先生", role="第三者確認", pin_hash=hash_pin("5678"))])
     if db.query(Vehicle).count() == 0:
         db.add(Vehicle(name="2号車", plate_number="品川 500 あ 1234"))
     db.commit()
@@ -136,10 +145,28 @@ def create_route(data: RouteCreate, db: Session = Depends(get_db)):
     if data.vehicle_id and not db.get(Vehicle, data.vehicle_id): raise HTTPException(404, "車両が見つかりません")
     item = BusRoute(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
 
+@app.post("/api/auth/login")
+def login(data: LoginIn, db: Session = Depends(get_db)):
+    staff = db.get(Staff, data.staff_id)
+    if not staff or staff.pin_hash != hash_pin(data.pin):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="職員IDまたはPINが正しくありません")
+    return {"id": staff.id, "name": staff.name, "role": staff.role}
+
+@app.get("/api/rides/status")
+def ride_status(db: Session = Depends(get_db)):
+    result = []
+    for child in db.query(Child).order_by(Child.name):
+        latest = db.query(SafetyEvent).filter_by(child_id=child.id).order_by(SafetyEvent.created_at.desc()).first()
+        result.append({"id": child.id, "name": child.name, "class_name": child.class_name, "qr_token": child.qr_token, "state": latest.event_type if latest else "未確認"})
+    return result
 @app.post("/api/scans")
 def scan(data: ScanIn, db: Session = Depends(get_db)):
+    staff = db.get(Staff, data.staff_id)
+    if not staff or staff.name != data.staff_name: raise HTTPException(401, "ログイン状態を確認してください")
     child = db.query(Child).filter_by(qr_token=data.qr_token).first()
     if not child: raise HTTPException(404, "QRコードが登録されていません")
     event = SafetyEvent(child_id=child.id, event_type=data.event_type, staff_name=data.staff_name, latitude=data.latitude, longitude=data.longitude)
     db.add(event); db.commit(); db.refresh(event)
     return {"child": child.name, "event_id": event.id, "recorded_at": event.created_at}
+
+

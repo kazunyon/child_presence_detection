@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 type Child = { name:string; age:string; state:'乗車済'|'降車済'|'未確認'; color:string }
 const children: Child[] = [
@@ -7,11 +7,12 @@ const children: Child[] = [
 const Icon = ({children}:{children:string}) => <span style={{fontSize:20,lineHeight:1}}>{children}</span>
 
 export default function App(){
- const [tab,setTab]=useState<'home'|'children'|'records'|'settings'>('home'); const [scan,setScan]=useState(false); const [done,setDone]=useState(false); const [time,setTime]=useState('');
+ const [tab,setTab]=useState<'home'|'children'|'records'|'settings'>('home'); const [scan,setScan]=useState(false); const [operator,setOperator]=useState<{id:number;name:string;role:string}|null>(null); const api=import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'; const [done,setDone]=useState(false); const [time,setTime]=useState('');
  useEffect(()=>setTime(new Intl.DateTimeFormat('ja-JP',{hour:'2-digit',minute:'2-digit'}).format(new Date())),[])
  const flowDone=done ? 4 : 2
+ const saveScan=async(qr_token:string)=>{ if(!operator){ alert('先に職員ログインをしてください'); return } try { const res=await fetch(api+'/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({qr_token,event_type:'降車済',staff_id:operator.id,staff_name:operator.name})}); if(!res.ok) throw new Error(); setScan(false); setDone(true) } catch { alert('保存できませんでした。APIの起動とネットワーク接続を確認してください。') } }
  return <div className="app">
-  <header className="px-5 pt-5 pb-4 flex justify-between items-center bg-white"><div><div className="text-xs font-bold text-teal">安全確認システム</div><div className="text-xl font-black tracking-tight">まもるバス <span className="text-sm font-medium">ひまわり園</span></div></div><div className="text-right"><div className="text-xs text-slate-500">2026年7月23日（木）</div><div className="font-bold text-sm">担当：田中 先生</div></div></header>
+  <header className="px-5 pt-5 pb-4 flex justify-between items-center bg-white"><div><div className="text-xs font-bold text-teal">安全確認システム</div><div className="text-xl font-black tracking-tight">まもるバス <span className="text-sm font-medium">ひまわり園</span></div></div><div className="text-right"><div className="text-xs text-slate-500">2026年7月23日（木）</div><button className="border-0 bg-transparent p-0 font-bold text-sm text-ink" onClick={()=>setOperator(null)}>担当：{operator?.name ?? "ログイン"}</button></div></header>
   <main className="px-5 pb-6">
   {tab==='home' && <>
    <section className="rounded-3xl bg-sand p-5 mt-1 border border-amber-100"><div className="flex items-start justify-between"><div><p className="m-0 text-sm font-bold text-amber-800">ただいまの運行</p><h1 className="m-0 mt-1 text-2xl font-black">帰り便　🚌 2号車</h1><p className="m-0 mt-2 text-sm">ひまわり園 → 各ご家庭</p></div><span className="badge bg-amber-200 text-amber-900">降車確認中</span></div><div className="mt-4 h-2 rounded-full bg-amber-100"><div className="h-2 rounded-full bg-amber-500" style={{width:`${flowDone*25}%`}}/></div><div className="flex justify-between mt-2 text-xs font-bold text-amber-900"><span>乗車</span><span>降車</span><span>車内確認</span><span>承認</span></div></section>
@@ -24,7 +25,7 @@ export default function App(){
   {tab==='settings' && <Settings />}
   </main>
   <nav className="nav"><button className={tab==='home'?'active':''} onClick={()=>setTab('home')}><Icon>⌂</Icon>ホーム</button><button className={tab==='children'?'active':''} onClick={()=>setTab('children')}><Icon>♙</Icon>園児</button><button className={tab==='records'?'active':''} onClick={()=>setTab('records')}><Icon>▣</Icon>記録</button><button className={tab==='settings'?'active':''} onClick={()=>setTab('settings')}><Icon>⚙</Icon>設定</button></nav>
-  {scan && <div className="modal"><div className="sheet"><div className="text-center"><span className="badge bg-teal text-white">カメラを起動中</span><h2 className="text-xl font-black">QRコードを枠の中に入れてください</h2></div><div className="scan">▦</div><p className="text-center text-sm text-slate-500">園児カード、または座席のQRシールを読み取ります</p><button className="big-action mt-3" onClick={()=>{setScan(false);setDone(true)}}>デモ：みおちゃんを確認する</button><button className="w-full p-4 border-0 bg-white text-slate-500 font-bold" onClick={()=>setScan(false)}>キャンセル</button></div></div>}
+  {scan && <div className="modal"><div className="sheet"><Scanner onRead={saveScan}/><button className="w-full p-4 border-0 bg-white text-slate-500 font-bold" onClick={()=>setScan(false)}>キャンセル</button></div></div>}
  </div>
 }
 
@@ -41,4 +42,14 @@ function Settings(){
  <section className="mt-5 rounded-2xl bg-slate-800 p-4 text-white"><b>管理者向け：API接続</b><p className="m-0 mt-2 text-sm text-slate-300">GitHub Pagesでは画面のみを配信します。登録情報をSQLiteへ保存するには、FastAPIを公開し、`VITE_API_BASE_URL` にそのURLを設定します。</p></section>
  </>
 }
+
+
+type Detector = { detect: (source: ImageBitmapSource) => Promise<Array<{rawValue:string}>> }
+declare global { interface Window { BarcodeDetector?: new (options:{formats:string[]}) => Detector } }
+function Scanner({onRead}:{onRead:(value:string)=>void}){
+ const video=useRef<HTMLVideoElement>(null); const [manual,setManual]=useState(''); const [note,setNote]=useState('カメラを起動しています…')
+ useEffect(()=>{ let stream:MediaStream|undefined; let timer=0; const start=async()=>{ try { stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}); if(video.current) video.current.srcObject=stream; if(!window.BarcodeDetector){setNote('この端末では自動読取に対応していません。QRコードの文字列を入力してください。'); return} const detector=new window.BarcodeDetector({formats:['qr_code']}); timer=window.setInterval(async()=>{if(video.current){const codes=await detector.detect(video.current); if(codes[0]?.rawValue) onRead(codes[0].rawValue)}},700)}catch{setNote('カメラを許可してください。許可できない場合は下に文字列を入力します。')}}; start(); return()=>{if(timer)window.clearInterval(timer);stream?.getTracks().forEach(t=>t.stop())}},[onRead])
+ return <><div className="text-center"><span className="badge bg-teal text-white">実カメラ読み取り</span><h2 className="text-xl font-black">園児QRを枠内へ</h2></div><video ref={video} autoPlay muted playsInline className="w-full aspect-square object-cover rounded-2xl bg-slate-900 mt-3"/><p className="text-center text-xs text-slate-500">{note}</p><div className="flex gap-2"><input value={manual} onChange={e=>setManual(e.target.value)} className="flex-1 border rounded-xl p-3" placeholder="QR文字列を入力"/><button className="bg-teal text-white font-bold rounded-xl px-4 border-0" onClick={()=>manual&&onRead(manual)}>登録</button></div></>
+}
+function Login({api,onLogin}:{api:string;onLogin:(staff:{id:number;name:string;role:string})=>void}){ const [id,setId]=useState('1');const [pin,setPin]=useState('');const [err,setErr]=useState('');const submit=async()=>{try{const r=await fetch(api+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({staff_id:Number(id),pin})});if(!r.ok)throw new Error();onLogin(await r.json())}catch{setErr('ログインできません。開発用は職員ID 1 / PIN 1234です。')}}; return <div className="modal"><div className="sheet"><h2 className="text-xl font-black text-center">職員ログイン</h2><p className="text-sm text-slate-500 text-center">担当者を確認してから操作を始めます。</p><input className="w-full border rounded-xl p-3 mb-2" value={id} onChange={e=>setId(e.target.value)} placeholder="職員ID" inputMode="numeric"/><input className="w-full border rounded-xl p-3" value={pin} onChange={e=>setPin(e.target.value)} placeholder="PIN" inputMode="numeric" type="password"/><p className="text-xs text-coral">{err}</p><button className="big-action mt-2" onClick={submit}>ログイン</button></div></div>}
 
