@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 raw_database_url = os.getenv("DATABASE_URL", "sqlite:///./mamoru_bus.db")
@@ -341,12 +341,59 @@ def seed(db: Session) -> None:
     db.commit()
 
 
+def migrate_legacy_database() -> None:
+    """Upgrade the original single-kindergarten schema without deleting its records."""
+    legacy_columns = {
+        "staff": {"organization_id": "INTEGER", "password_hash": "VARCHAR(256)", "is_active": "BOOLEAN DEFAULT TRUE"},
+        "vehicles": {"organization_id": "INTEGER"},
+        "bus_routes": {"organization_id": "INTEGER"},
+        "children": {"organization_id": "INTEGER"},
+        "bus_trips": {"organization_id": "INTEGER"},
+        "vehicle_safety_checks": {"organization_id": "INTEGER", "trip_id": "INTEGER"},
+        "notification_queue": {"organization_id": "INTEGER", "channel": "VARCHAR(30) DEFAULT 'webhook'", "provider_response": "TEXT", "sent_at": "DATETIME"},
+    }
+    tables = set(inspect(engine).get_table_names())
+    with engine.begin() as connection:
+        for table, columns in legacy_columns.items():
+            if table not in tables:
+                continue
+            existing = {column["name"] for column in inspect(connection).get_columns(table)}
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+
+        # Old installations stored all data in one kindergarten. Keep that data and
+        # attach it to one organization before tenant filtering is enabled.
+        org_id = connection.execute(text("SELECT id FROM organizations ORDER BY id LIMIT 1")).scalar()
+        if org_id is None:
+            org_id = connection.execute(text("INSERT INTO organizations (name, created_at) VALUES (:name, :created_at) RETURNING id"), {"name": "既存園", "created_at": datetime.now(timezone.utc)}).scalar()
+        for table in ("staff", "vehicles", "bus_routes", "children", "bus_trips", "vehicle_safety_checks", "notification_queue"):
+            if table in tables:
+                connection.execute(text(f"UPDATE {table} SET organization_id = :org_id WHERE organization_id IS NULL"), {"org_id": org_id})
+
+    with SessionLocal() as db:
+        # Legacy installations used SHA-256 PIN hashes. Convert the shipped staff
+        # accounts to the current slow password hash on first startup.
+        pin_by_name = {"田中 先生": "1234", "佐藤 先生": "5678", "管理者": "admin1234"}
+        role_map = {"運転担当": "operator", "第三者確認": "verifier", "管理者": "admin", "職員": "operator"}
+        changed = False
+        for staff in db.query(Staff).all():
+            if not staff.password_hash and staff.name in pin_by_name:
+                staff.password_hash = hash_pin(pin_by_name[staff.name]); changed = True
+            if not staff.is_active:
+                staff.is_active = True; changed = True
+            mapped_role = role_map.get(staff.role)
+            if mapped_role and staff.role != mapped_role:
+                staff.role = mapped_role; changed = True
+        if changed:
+            db.commit()
 app = FastAPI(title="まもるバス API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 @app.on_event("startup")
 def setup() -> None:
     Base.metadata.create_all(engine)
+    migrate_legacy_database()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with SessionLocal() as db:
         seed(db)
