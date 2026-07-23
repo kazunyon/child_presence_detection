@@ -44,6 +44,17 @@ class Child(Base):
     class_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     qr_token: Mapped[str] = mapped_column(String(100), unique=True)
 
+class VehicleSafetyCheck(Base):
+    __tablename__ = "vehicle_safety_checks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    check_type: Mapped[str] = mapped_column(String(40))
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    staff_name: Mapped[str] = mapped_column(String(100))
+    qr_token: Mapped[str] = mapped_column(String(100))
+    latitude: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    longitude: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 class SafetyEvent(Base):
     __tablename__ = "safety_events"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -71,6 +82,14 @@ class RouteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: str = Field(default="往路", max_length=20)
     vehicle_id: int | None = None
+class VehicleCheckIn(BaseModel):
+    check_type: str
+    staff_id: int
+    staff_name: str
+    qr_token: str
+    latitude: str | None = None
+    longitude: str | None = None
+
 class LoginIn(BaseModel):
     staff_id: int
     pin: str = Field(min_length=4, max_length=12)
@@ -145,6 +164,12 @@ def create_route(data: RouteCreate, db: Session = Depends(get_db)):
     if data.vehicle_id and not db.get(Vehicle, data.vehicle_id): raise HTTPException(404, "車両が見つかりません")
     item = BusRoute(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
 
+@app.post("/api/vehicle-checks", status_code=status.HTTP_201_CREATED)
+def vehicle_check(data: VehicleCheckIn, db: Session = Depends(get_db)):
+    staff = db.get(Staff, data.staff_id)
+    if not staff or staff.name != data.staff_name: raise HTTPException(401, "ログイン状態を確認してください")
+    item = VehicleSafetyCheck(**data.model_dump()); db.add(item); db.commit(); db.refresh(item)
+    return {"id": item.id, "check_type": item.check_type, "recorded_at": item.created_at}
 @app.post("/api/auth/login")
 def login(data: LoginIn, db: Session = Depends(get_db)):
     staff = db.get(Staff, data.staff_id)
@@ -168,5 +193,6 @@ def scan(data: ScanIn, db: Session = Depends(get_db)):
     event = SafetyEvent(child_id=child.id, event_type=data.event_type, staff_name=data.staff_name, latitude=data.latitude, longitude=data.longitude)
     db.add(event); db.commit(); db.refresh(event)
     return {"child": child.name, "event_id": event.id, "recorded_at": event.created_at}
+
 
 
