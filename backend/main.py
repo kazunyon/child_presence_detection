@@ -44,6 +44,15 @@ class Child(Base):
     class_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     qr_token: Mapped[str] = mapped_column(String(100), unique=True)
 
+class NotificationQueue(Base):
+    __tablename__ = "notification_queue"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recipient_type: Mapped[str] = mapped_column(String(30))
+    recipient: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 class VehicleSafetyCheck(Base):
     __tablename__ = "vehicle_safety_checks"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -82,6 +91,11 @@ class RouteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: str = Field(default="往路", max_length=20)
     vehicle_id: int | None = None
+class NotificationIn(BaseModel):
+    recipient_type: str
+    recipient: str
+    message: str
+
 class VehicleCheckIn(BaseModel):
     check_type: str
     staff_id: int
@@ -164,6 +178,14 @@ def create_route(data: RouteCreate, db: Session = Depends(get_db)):
     if data.vehicle_id and not db.get(Vehicle, data.vehicle_id): raise HTTPException(404, "車両が見つかりません")
     item = BusRoute(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
 
+@app.post("/api/notifications", status_code=status.HTTP_201_CREATED)
+def queue_notification(data: NotificationIn, db: Session = Depends(get_db)):
+    item = NotificationQueue(**data.model_dump()); db.add(item); db.commit(); db.refresh(item)
+    return {"id": item.id, "status": item.status, "created_at": item.created_at}
+
+@app.get("/api/notifications")
+def list_notifications(db: Session = Depends(get_db)):
+    return db.query(NotificationQueue).order_by(NotificationQueue.created_at.desc()).limit(100).all()
 @app.post("/api/vehicle-checks", status_code=status.HTTP_201_CREATED)
 def vehicle_check(data: VehicleCheckIn, db: Session = Depends(get_db)):
     staff = db.get(Staff, data.staff_id)
@@ -193,6 +215,7 @@ def scan(data: ScanIn, db: Session = Depends(get_db)):
     event = SafetyEvent(child_id=child.id, event_type=data.event_type, staff_name=data.staff_name, latitude=data.latitude, longitude=data.longitude)
     db.add(event); db.commit(); db.refresh(event)
     return {"child": child.name, "event_id": event.id, "recorded_at": event.created_at}
+
 
 
 
