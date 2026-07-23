@@ -6,3 +6,6 @@ vite.config.d.ts
 __pycache__/
 *.db
 .env
+.env.local
+.env
+
