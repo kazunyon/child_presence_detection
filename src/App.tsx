@@ -25,6 +25,7 @@ export default function App(){
   {tab==='settings' && <Settings />}
   </main>
   <nav className="nav"><button className={tab==='home'?'active':''} onClick={()=>setTab('home')}><Icon>⌂</Icon>ホーム</button><button className={tab==='children'?'active':''} onClick={()=>setTab('children')}><Icon>♙</Icon>園児</button><button className={tab==='records'?'active':''} onClick={()=>setTab('records')}><Icon>▣</Icon>記録</button><button className={tab==='settings'?'active':''} onClick={()=>setTab('settings')}><Icon>⚙</Icon>設定</button></nav>
+  {!operator && <Login api={api} onLogin={setOperator}/>}
   {scan && <div className="modal"><div className="sheet"><Scanner onRead={saveScan}/><button className="w-full p-4 border-0 bg-white text-slate-500 font-bold" onClick={()=>setScan(false)}>キャンセル</button></div></div>}
  </div>
 }
@@ -52,4 +53,5 @@ function Scanner({onRead}:{onRead:(value:string)=>void}){
  return <><div className="text-center"><span className="badge bg-teal text-white">実カメラ読み取り</span><h2 className="text-xl font-black">園児QRを枠内へ</h2></div><video ref={video} autoPlay muted playsInline className="w-full aspect-square object-cover rounded-2xl bg-slate-900 mt-3"/><p className="text-center text-xs text-slate-500">{note}</p><div className="flex gap-2"><input value={manual} onChange={e=>setManual(e.target.value)} className="flex-1 border rounded-xl p-3" placeholder="QR文字列を入力"/><button className="bg-teal text-white font-bold rounded-xl px-4 border-0" onClick={()=>manual&&onRead(manual)}>登録</button></div></>
 }
 function Login({api,onLogin}:{api:string;onLogin:(staff:{id:number;name:string;role:string})=>void}){ const [id,setId]=useState('1');const [pin,setPin]=useState('');const [err,setErr]=useState('');const submit=async()=>{try{const r=await fetch(api+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({staff_id:Number(id),pin})});if(!r.ok)throw new Error();onLogin(await r.json())}catch{setErr('ログインできません。開発用は職員ID 1 / PIN 1234です。')}}; return <div className="modal"><div className="sheet"><h2 className="text-xl font-black text-center">職員ログイン</h2><p className="text-sm text-slate-500 text-center">担当者を確認してから操作を始めます。</p><input className="w-full border rounded-xl p-3 mb-2" value={id} onChange={e=>setId(e.target.value)} placeholder="職員ID" inputMode="numeric"/><input className="w-full border rounded-xl p-3" value={pin} onChange={e=>setPin(e.target.value)} placeholder="PIN" inputMode="numeric" type="password"/><p className="text-xs text-coral">{err}</p><button className="big-action mt-2" onClick={submit}>ログイン</button></div></div>}
+
 
