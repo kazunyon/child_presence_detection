@@ -369,6 +369,23 @@ def login(data: LoginIn, db: Session = Depends(get_db)) -> dict:
 def me(actor: Staff = Depends(current_staff)) -> dict:
     return {"id": actor.id, "name": actor.name, "role": actor.role, "organization_id": actor.organization_id}
 
+@app.get("/api/dashboard")
+def dashboard(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
+    organization = db.get(Organization, actor.organization_id)
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    trips = db.query(BusTrip).filter(BusTrip.organization_id == actor.organization_id, BusTrip.started_at >= day_start, BusTrip.started_at < day_end).order_by(BusTrip.started_at.desc()).all()
+    summaries = [trip_summary(db, trip) for trip in trips]
+    return {
+        "organization_name": organization.name if organization else "園",
+        "date": day_start.date().isoformat(),
+        "today_trip_count": len(trips),
+        "active_trip_count": sum(1 for trip in trips if trip.status == "運行中"),
+        "completed_trip_count": sum(1 for trip in trips if trip.status == "完了"),
+        "unconfirmed_count": sum(summary["unconfirmed"] for summary in summaries),
+        "recent_trips": [{"trip_id": trip.id, "status": trip.status, "direction": trip.direction, "started_at": trip.started_at, "unconfirmed": summary["unconfirmed"]} for trip, summary in zip(trips[:5], summaries[:5])],
+    }
 @app.get("/api/bootstrap")
 def bootstrap(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
     oid = actor.organization_id
