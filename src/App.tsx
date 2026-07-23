@@ -7,7 +7,7 @@ const children: Child[] = [
 const Icon = ({children}:{children:string}) => <span style={{fontSize:20,lineHeight:1}}>{children}</span>
 
 export default function App(){
- const [tab,setTab]=useState<'home'|'children'|'records'>('home'); const [scan,setScan]=useState(false); const [done,setDone]=useState(false); const [time,setTime]=useState('');
+ const [tab,setTab]=useState<'home'|'children'|'records'|'settings'>('home'); const [scan,setScan]=useState(false); const [done,setDone]=useState(false); const [time,setTime]=useState('');
  useEffect(()=>setTime(new Intl.DateTimeFormat('ja-JP',{hour:'2-digit',minute:'2-digit'}).format(new Date())),[])
  const flowDone=done ? 4 : 2
  return <div className="app">
@@ -21,8 +21,24 @@ export default function App(){
   </>}
   {tab==='children' && <><h1 className="text-2xl font-black mt-5">本日の園児一覧</h1><p className="text-sm text-slate-500">QRコードをかざして、乗車・降車を記録します。</p><div className="card overflow-hidden mt-4">{children.map(c=><div className="p-4 flex items-center border-b border-slate-100" key={c.name}><div className="w-11 h-11 rounded-full mr-3 grid place-items-center font-black" style={{background:c.color}}>{c.name[0]}</div><div className="flex-1"><b>{c.name}</b><div className="text-xs text-slate-500">{c.age}　個別QRコード登録済み</div></div><span className="badge bg-slate-100 text-slate-600">{c.state}</span></div>)}</div><button className="big-action mt-5" onClick={()=>setScan(true)}>📷　QRを読み取る</button></>}
   {tab==='records' && <><h1 className="text-2xl font-black mt-5">安全確認の記録</h1><div className="card mt-4 p-4"><b>2026年7月23日　帰り便 2号車</b><p className="text-sm text-slate-500 mb-3">15:08 完了 ／ 田中・佐藤 先生</p><div className="grid grid-cols-4 text-center text-xs"><div>✓<br/>乗車 4名</div><div>✓<br/>降車 4名</div><div>✓<br/>車内確認</div><div>✓<br/>第三者承認</div></div><button className="mt-4 w-full border border-teal bg-white rounded-xl p-3 text-teal font-bold">証跡を確認する</button></div><p className="mt-5 text-xs text-slate-500">記録には日時・GPS位置・確認担当者・撮影画像のAI判定結果が保存されています。</p></>}
+  {tab==='settings' && <Settings />}
   </main>
-  <nav className="nav"><button className={tab==='home'?'active':''} onClick={()=>setTab('home')}><Icon>⌂</Icon>ホーム</button><button className={tab==='children'?'active':''} onClick={()=>setTab('children')}><Icon>♙</Icon>園児</button><button className={tab==='records'?'active':''} onClick={()=>setTab('records')}><Icon>▣</Icon>記録</button></nav>
+  <nav className="nav"><button className={tab==='home'?'active':''} onClick={()=>setTab('home')}><Icon>⌂</Icon>ホーム</button><button className={tab==='children'?'active':''} onClick={()=>setTab('children')}><Icon>♙</Icon>園児</button><button className={tab==='records'?'active':''} onClick={()=>setTab('records')}><Icon>▣</Icon>記録</button><button className={tab==='settings'?'active':''} onClick={()=>setTab('settings')}><Icon>⚙</Icon>設定</button></nav>
   {scan && <div className="modal"><div className="sheet"><div className="text-center"><span className="badge bg-teal text-white">カメラを起動中</span><h2 className="text-xl font-black">QRコードを枠の中に入れてください</h2></div><div className="scan">▦</div><p className="text-center text-sm text-slate-500">園児カード、または座席のQRシールを読み取ります</p><button className="big-action mt-3" onClick={()=>{setScan(false);setDone(true)}}>デモ：みおちゃんを確認する</button><button className="w-full p-4 border-0 bg-white text-slate-500 font-bold" onClick={()=>setScan(false)}>キャンセル</button></div></div>}
  </div>
 }
+
+function Settings(){
+ const [section,setSection] = useState<'children'|'staff'|'vehicles'|'routes'>('children')
+ const [items,setItems] = useState({children:['さくら ちゃん（年少）','はると くん（年長）'],staff:['田中 先生（運転担当）','佐藤 先生（第三者確認）'],vehicles:['2号車　品川 500 あ 1234'],routes:['ひまわり園 送迎便（帰り・2号車）']})
+ const [name,setName] = useState('')
+ const labels={children:'園児',staff:'職員',vehicles:'車両',routes:'便'}
+ const add=()=>{ if(!name.trim()) return; setItems({...items,[section]:[...items[section],name.trim()]}); setName('') }
+ return <><h1 className="text-2xl font-black mt-5">園の基本設定</h1><p className="text-sm text-slate-500">最初に、運行に必要な情報を登録してください。</p>
+ <section className="card mt-4 p-4 bg-mint"><b>✓ 初期設定の状況</b><div className="mt-2 text-sm">園児・職員・車両・便を登録すると、QR乗降管理を始められます。</div></section>
+ <div className="grid grid-cols-2 gap-2 mt-4">{(Object.keys(labels) as Array<keyof typeof labels>).map(key=><button key={key} onClick={()=>setSection(key)} className={'rounded-xl p-3 border font-bold text-sm '+(section===key?'bg-teal text-white border-teal':'bg-white border-slate-200')}>{labels[key]}を登録</button>)}</div>
+ <section className="card mt-4 p-4"><h2 className="m-0 text-lg font-black">{labels[section]}の登録</h2><p className="text-xs text-slate-500">{section==='children'?'例：あおい ちゃん（年少）　※QRコードはAPI登録時に発行します':section==='staff'?'例：鈴木 先生（運転担当）':section==='vehicles'?'例：1号車　品川 500 あ 1234':'例：朝便（1号車）'}</p><div className="flex gap-2"><input className="flex-1 rounded-xl border border-slate-300 p-3 text-sm" value={name} onChange={e=>setName(e.target.value)} placeholder={`${labels[section]}名を入力`} /><button onClick={add} className="rounded-xl border-0 bg-teal px-4 font-bold text-white">追加</button></div><div className="mt-4">{items[section].map((item,i)=><div className="border-t border-slate-100 py-3 text-sm" key={i}>✓　{item}</div>)}</div></section>
+ <section className="mt-5 rounded-2xl bg-slate-800 p-4 text-white"><b>管理者向け：API接続</b><p className="m-0 mt-2 text-sm text-slate-300">GitHub Pagesでは画面のみを配信します。登録情報をSQLiteへ保存するには、FastAPIを公開し、`VITE_API_BASE_URL` にそのURLを設定します。</p></section>
+ </>
+}
+
