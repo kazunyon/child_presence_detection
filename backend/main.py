@@ -319,7 +319,17 @@ def trip_summary(db: Session, trip: BusTrip) -> dict:
     children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at} for a, c in rows]
     boarded = sum(x["boarded_at"] is not None for x in children)
     alighted = sum(x["alighted_at"] is not None for x in children)
-    return {"trip_id": trip.id, "status": trip.status, "boarded": boarded, "alighted": alighted, "unconfirmed": boarded - alighted, "children": children}
+    check_types = {row[0] for row in db.query(VehicleSafetyCheck.check_type).filter_by(organization_id=trip.organization_id, trip_id=trip.id).all()}
+    return {
+        "trip_id": trip.id,
+        "status": trip.status,
+        "boarded": boarded,
+        "alighted": alighted,
+        "unconfirmed": boarded - alighted,
+        "tail_confirmed": "tail_qr" in check_types,
+        "third_party_confirmed": "third_party" in check_types,
+        "children": children,
+    }
 
 
 def seed(db: Session) -> None:
