@@ -32,7 +32,7 @@ export default function App() {
   const auth = (init:RequestInit={}) => ({...init, headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`,...(init.headers||{})}})
   const logout = () => { localStorage.removeItem('mamoru-bus-token'); setToken(null); setOperator(null); setTrip(null); setDashboard(null); setRoutes([]); setView('home'); setMessage('ログアウトしました') }
   const loadDashboard = async () => { if (!token) return; const r = await fetch(`${API}/api/dashboard`,auth()); if (!r.ok) throw new Error(); setDashboard(await r.json()) }
-  const loadBootstrap = async () => { const r = await fetch(`${API}/api/bootstrap`,auth()); if (!r.ok) throw new Error(); const data = await r.json(); setRoutes(data.routes || []); setVehicles(data.vehicles || []) }
+  const loadBootstrap = async () => { const [routeResponse, vehicleResponse] = await Promise.all([fetch(`${API}/api/routes`,auth()), fetch(`${API}/api/vehicles`,auth())]); if (!routeResponse.ok || !vehicleResponse.ok) throw new Error(); setRoutes(await routeResponse.json()); setVehicles(await vehicleResponse.json()) }
   const refresh = async (tripId:number) => { const r = await fetch(`${API}/api/trips/${tripId}/status`,auth()); if (!r.ok) throw new Error(await messageOf(r)); setTrip(await r.json()); await loadDashboard() }
   const sync = async () => {
     if (!token || !queue().length || !navigator.onLine) return
@@ -40,7 +40,12 @@ export default function App() {
   }
   useEffect(() => {
     if (!token) return
-    Promise.all([fetch(`${API}/api/auth/me`,auth()), loadBootstrap()]).then(async ([me]) => { if (!me.ok) throw new Error(); setOperator(await me.json()); await loadDashboard(); await sync() }).catch(logout)
+    fetch(`${API}/api/auth/me`,auth()).then(async me => {
+      if (!me.ok) throw new Error()
+      setOperator(await me.json())
+      try { await Promise.all([loadBootstrap(), loadDashboard()]); await sync() }
+      catch { setMessage('一部の初期データを取得できませんでした。運行画面を開き直してください。') }
+    }).catch(logout)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
   useEffect(() => { const online = () => sync(); window.addEventListener('online',online); return () => window.removeEventListener('online',online) })

@@ -446,7 +446,16 @@ def dashboard(actor: Staff = Depends(current_staff), db: Session = Depends(get_d
 @app.get("/api/bootstrap")
 def bootstrap(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
     oid = actor.organization_id
-    return {"children": db.query(Child).filter_by(organization_id=oid).all(), "staff": db.query(Staff).filter_by(organization_id=oid).all(), "vehicles": db.query(Vehicle).filter_by(organization_id=oid).all(), "routes": db.query(BusRoute).filter_by(organization_id=oid).all()}
+    children = db.query(Child).filter_by(organization_id=oid).order_by(Child.name).all()
+    staff = db.query(Staff).filter_by(organization_id=oid).order_by(Staff.name).all()
+    vehicles = db.query(Vehicle).filter_by(organization_id=oid).order_by(Vehicle.name).all()
+    routes = db.query(BusRoute).filter_by(organization_id=oid).order_by(BusRoute.name).all()
+    return {
+        "children": [{"id": item.id, "name": item.name, "class_name": item.class_name, "qr_token": item.qr_token} for item in children],
+        "staff": [{"id": item.id, "name": item.name, "role": item.role, "is_active": item.is_active} for item in staff],
+        "vehicles": [{"id": item.id, "name": item.name, "plate_number": item.plate_number} for item in vehicles],
+        "routes": [{"id": item.id, "name": item.name, "direction": item.direction, "vehicle_id": item.vehicle_id} for item in routes],
+    }
 
 @app.get("/api/children")
 def list_children(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
