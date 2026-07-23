@@ -430,10 +430,11 @@ def create_trip(data: TripCreate, actor: Staff = Depends(current_staff), db: Ses
     trip = BusTrip(organization_id=actor.organization_id, **data.model_dump()); db.add(trip); db.flush(); audit(db, actor, "trip.create", "trip", trip.id); db.commit(); db.refresh(trip); return trip
 
 @app.get("/api/trips")
-def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, status_filter: str | None = None, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     query = db.query(BusTrip).filter_by(organization_id=actor.organization_id)
     if from_at: query = query.filter(BusTrip.started_at >= from_at)
     if to_at: query = query.filter(BusTrip.started_at <= to_at)
+    if status_filter: query = query.filter(BusTrip.status == status_filter)
     return [trip_summary(db, trip) | {"started_at": trip.started_at, "completed_at": trip.completed_at, "direction": trip.direction} for trip in query.order_by(BusTrip.started_at.desc()).limit(200)]
 
 @app.post("/api/trips/{trip_id}/scans")
