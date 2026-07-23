@@ -44,6 +44,26 @@ class Child(Base):
     class_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     qr_token: Mapped[str] = mapped_column(String(100), unique=True)
 
+class BusTrip(Base):
+    __tablename__ = "bus_trips"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    route_id: Mapped[int | None] = mapped_column(ForeignKey("bus_routes.id"), nullable=True)
+    vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True)
+    direction: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(30), default="運行中")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+class TripAttendance(Base):
+    __tablename__ = "trip_attendance"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trip_id: Mapped[int] = mapped_column(ForeignKey("bus_trips.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"))
+    boarded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    alighted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    boarded_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    alighted_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
 class NotificationQueue(Base):
     __tablename__ = "notification_queue"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -91,6 +111,16 @@ class RouteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: str = Field(default="往路", max_length=20)
     vehicle_id: int | None = None
+class TripCreate(BaseModel):
+    route_id: int | None = None
+    vehicle_id: int | None = None
+    direction: str = "帰り"
+class TripScanIn(BaseModel):
+    qr_token: str
+    event_type: str = Field(pattern="^(乗車|降車)$")
+    staff_id: int
+    staff_name: str
+
 class NotificationIn(BaseModel):
     recipient_type: str
     recipient: str
@@ -178,6 +208,45 @@ def create_route(data: RouteCreate, db: Session = Depends(get_db)):
     if data.vehicle_id and not db.get(Vehicle, data.vehicle_id): raise HTTPException(404, "車両が見つかりません")
     item = BusRoute(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
 
+@app.post("/api/trips", status_code=status.HTTP_201_CREATED)
+def create_trip(data: TripCreate, db: Session = Depends(get_db)):
+    trip = BusTrip(**data.model_dump()); db.add(trip); db.commit(); db.refresh(trip); return trip
+
+@app.post("/api/trips/{trip_id}/scans")
+def trip_scan(trip_id: int, data: TripScanIn, db: Session = Depends(get_db)):
+    trip = db.get(BusTrip, trip_id)
+    staff = db.get(Staff, data.staff_id)
+    child = db.query(Child).filter_by(qr_token=data.qr_token).first()
+    if not trip: raise HTTPException(404, "運行便が見つかりません")
+    if trip.status != "運行中": raise HTTPException(409, "この便は完了しています")
+    if not staff or staff.name != data.staff_name: raise HTTPException(401, "ログイン状態を確認してください")
+    if not child: raise HTTPException(404, "QRコードが登録されていません")
+    attendance = db.query(TripAttendance).filter_by(trip_id=trip_id, child_id=child.id).first()
+    if not attendance: attendance = TripAttendance(trip_id=trip_id, child_id=child.id); db.add(attendance)
+    now = datetime.now(timezone.utc)
+    if data.event_type == "乗車":
+        if attendance.boarded_at: raise HTTPException(409, "この園児はすでに乗車済みです")
+        attendance.boarded_at, attendance.boarded_by = now, staff.name
+    else:
+        if not attendance.boarded_at: raise HTTPException(409, "乗車記録がないため降車できません")
+        if attendance.alighted_at: raise HTTPException(409, "この園児はすでに降車済みです")
+        attendance.alighted_at, attendance.alighted_by = now, staff.name
+    db.commit(); return {"child": child.name, "event_type": data.event_type, "trip_id": trip_id}
+
+@app.get("/api/trips/{trip_id}/status")
+def trip_status(trip_id: int, db: Session = Depends(get_db)):
+    trip = db.get(BusTrip, trip_id)
+    if not trip: raise HTTPException(404, "運行便が見つかりません")
+    rows = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip_id).all()
+    children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at} for a,c in rows]
+    boarded = sum(1 for x in children if x["boarded_at"]); alighted = sum(1 for x in children if x["alighted_at"])
+    return {"trip_id": trip_id, "status": trip.status, "boarded": boarded, "alighted": alighted, "unconfirmed": boarded-alighted, "children": children}
+
+@app.post("/api/trips/{trip_id}/complete")
+def complete_trip(trip_id: int, db: Session = Depends(get_db)):
+    summary = trip_status(trip_id, db)
+    if summary["unconfirmed"]: raise HTTPException(409, "未降車の園児がいるため完了できません")
+    trip = db.get(BusTrip, trip_id); trip.status="完了"; trip.completed_at=datetime.now(timezone.utc); db.commit(); return {"status":"完了"}
 @app.post("/api/notifications", status_code=status.HTTP_201_CREATED)
 def queue_notification(data: NotificationIn, db: Session = Depends(get_db)):
     item = NotificationQueue(**data.model_dump()); db.add(item); db.commit(); db.refresh(item)
@@ -215,6 +284,7 @@ def scan(data: ScanIn, db: Session = Depends(get_db)):
     event = SafetyEvent(child_id=child.id, event_type=data.event_type, staff_name=data.staff_name, latitude=data.latitude, longitude=data.longitude)
     db.add(event); db.commit(); db.refresh(event)
     return {"child": child.name, "event_id": event.id, "recorded_at": event.created_at}
+
 
 
 
