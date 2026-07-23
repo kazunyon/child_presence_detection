@@ -6,6 +6,10 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
+    disk:
+      name: mamoru-bus-uploads
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -17,6 +21,12 @@ services:
         value: https://kazunyon.github.io
       - key: ENVIRONMENT
         value: production
+      - key: UPLOAD_DIR
+        value: /var/data/mamoru-bus-uploads
+      - key: TOKEN_EXPIRE_MINUTES
+        value: '480'
+      - key: NOTIFICATION_WEBHOOK_URL
+        sync: false
 databases:
   - name: mamoru-bus-db
     plan: starter

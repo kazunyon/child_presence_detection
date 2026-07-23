@@ -1,63 +1,102 @@
-"""MAMORU BUS backend. Defaults to SQLite; set DATABASE_URL for PostgreSQL."""
-from datetime import datetime, timezone
-import os
-import hashlib
-from typing import Generator
+"""MAMORU BUS API — tenant-scoped safety record backend."""
+from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from datetime import datetime, timedelta, timezone
+from hashlib import pbkdf2_hmac
+import base64
+import hmac
+import json
+import os
+from pathlib import Path
+import secrets
+from typing import Generator, Literal
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import DateTime, ForeignKey, String, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 raw_database_url = os.getenv("DATABASE_URL", "sqlite:///./mamoru_bus.db")
-# Render returns postgres:// or postgresql:// URLs. SQLAlchemy uses the psycopg v3 driver explicitly.
 DATABASE_URL = raw_database_url.replace("postgres://", "postgresql+psycopg://", 1).replace("postgresql://", "postgresql+psycopg://", 1)
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-me")
+JWT_ALGORITHM = "HS256"
+TOKEN_MINUTES = int(os.getenv("TOKEN_EXPIRE_MINUTES", "480"))
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
+security = HTTPBearer()
+
 
 class Base(DeclarativeBase):
     pass
 
+
+class Organization(Base):
+    __tablename__ = "organizations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class Staff(Base):
     __tablename__ = "staff"
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
     name: Mapped[str] = mapped_column(String(100))
-    role: Mapped[str] = mapped_column(String(40), default="職員")
-    pin_hash: Mapped[str] = mapped_column(String(64), default=lambda: hash_pin("0000"))
+    role: Mapped[str] = mapped_column(String(40), default="operator")
+    password_hash: Mapped[str] = mapped_column(String(256))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
 
 class Vehicle(Base):
     __tablename__ = "vehicles"
+    __table_args__ = (UniqueConstraint("organization_id", "name", name="uq_vehicle_org_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), unique=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
     plate_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
 
 class BusRoute(Base):
     __tablename__ = "bus_routes"
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
     name: Mapped[str] = mapped_column(String(100))
     direction: Mapped[str] = mapped_column(String(20), default="往路")
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True)
 
+
 class Child(Base):
     __tablename__ = "children"
+    __table_args__ = (UniqueConstraint("organization_id", "qr_token", name="uq_child_org_qr"),)
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
     name: Mapped[str] = mapped_column(String(100))
     class_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    qr_token: Mapped[str] = mapped_column(String(100), unique=True)
+    qr_token: Mapped[str] = mapped_column(String(100))
+
 
 class BusTrip(Base):
     __tablename__ = "bus_trips"
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
     route_id: Mapped[int | None] = mapped_column(ForeignKey("bus_routes.id"), nullable=True)
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True)
     direction: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30), default="運行中")
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
 
 class TripAttendance(Base):
     __tablename__ = "trip_attendance"
+    __table_args__ = (UniqueConstraint("trip_id", "child_id", name="uq_attendance_trip_child"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     trip_id: Mapped[int] = mapped_column(ForeignKey("bus_trips.id"))
     child_id: Mapped[int] = mapped_column(ForeignKey("children.id"))
@@ -66,18 +105,12 @@ class TripAttendance(Base):
     boarded_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     alighted_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
-class NotificationQueue(Base):
-    __tablename__ = "notification_queue"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    recipient_type: Mapped[str] = mapped_column(String(30))
-    recipient: Mapped[str] = mapped_column(String(200))
-    message: Mapped[str] = mapped_column(String(500))
-    status: Mapped[str] = mapped_column(String(30), default="queued")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class VehicleSafetyCheck(Base):
     __tablename__ = "vehicle_safety_checks"
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    trip_id: Mapped[int | None] = mapped_column(ForeignKey("bus_trips.id"), nullable=True)
     check_type: Mapped[str] = mapped_column(String(40))
     staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
     staff_name: Mapped[str] = mapped_column(String(100))
@@ -86,26 +119,69 @@ class VehicleSafetyCheck(Base):
     longitude: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-class SafetyEvent(Base):
-    __tablename__ = "safety_events"
+
+class NotificationQueue(Base):
+    __tablename__ = "notification_queue"
     id: Mapped[int] = mapped_column(primary_key=True)
-    child_id: Mapped[int | None] = mapped_column(ForeignKey("children.id"), nullable=True)
-    event_type: Mapped[str] = mapped_column(String(40))
-    staff_name: Mapped[str] = mapped_column(String(100))
-    latitude: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    longitude: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    recipient_type: Mapped[str] = mapped_column(String(30))
+    recipient: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(String(500))
+    channel: Mapped[str] = mapped_column(String(30), default="webhook")
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    provider_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    resource_type: Mapped[str] = mapped_column(String(60))
+    resource_id: Mapped[str] = mapped_column(String(60))
+    detail: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class SyncEvent(Base):
+    __tablename__ = "sync_events"
+    __table_args__ = (UniqueConstraint("organization_id", "client_event_id", name="uq_sync_org_event"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    client_event_id: Mapped[str] = mapped_column(String(80))
+    outcome: Mapped[str] = mapped_column(String(30))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-class ConfigModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
 
+class VideoEvidence(Base):
+    __tablename__ = "video_evidence"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    trip_id: Mapped[int] = mapped_column(ForeignKey("bus_trips.id"))
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    file_name: Mapped[str] = mapped_column(String(255))
+    storage_key: Mapped[str] = mapped_column(String(255), unique=True)
+    content_type: Mapped[str] = mapped_column(String(100))
+    ai_status: Mapped[str] = mapped_column(String(30), default="queued")
+    ai_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class LoginIn(BaseModel):
+    staff_id: int
+    pin: str = Field(min_length=4, max_length=128)
+
+class StaffCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    role: Literal["admin", "operator", "verifier"] = "operator"
+    pin: str = Field(min_length=8, max_length=128)
 class ChildCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     class_name: str | None = Field(default=None, max_length=50)
     qr_token: str = Field(min_length=1, max_length=100)
-class StaffCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    role: str = Field(default="職員", max_length=40)
 class VehicleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     plate_number: str | None = Field(default=None, max_length=30)
@@ -119,176 +195,310 @@ class TripCreate(BaseModel):
     direction: str = "帰り"
 class TripScanIn(BaseModel):
     qr_token: str
-    event_type: str = Field(pattern="^(乗車|降車)$")
-    staff_id: int
-    staff_name: str
-
+    event_type: Literal["乗車", "降車"]
+class VehicleCheckIn(BaseModel):
+    trip_id: int | None = None
+    check_type: str = Field(min_length=1, max_length=40)
+    qr_token: str = Field(min_length=1, max_length=100)
+    latitude: str | None = None
+    longitude: str | None = None
 class NotificationIn(BaseModel):
     recipient_type: str
     recipient: str
-    message: str
+    message: str = Field(max_length=500)
+    channel: Literal["webhook", "email", "sms", "push"] = "webhook"
+class ThirdApprovalIn(BaseModel):
+    staff_id: int
+    pin: str = Field(min_length=4, max_length=128)
 
-class VehicleCheckIn(BaseModel):
-    check_type: str
-    staff_id: int
-    staff_name: str
+class SyncItem(BaseModel):
+    client_event_id: str = Field(min_length=1, max_length=80)
+    trip_id: int
     qr_token: str
-    latitude: str | None = None
-    longitude: str | None = None
+    event_type: Literal["乗車", "降車"]
+class SyncIn(BaseModel):
+    events: list[SyncItem] = Field(max_length=100)
 
-class LoginIn(BaseModel):
-    staff_id: int
-    pin: str = Field(min_length=4, max_length=12)
-class ScanIn(BaseModel):
-    qr_token: str
-    event_type: str
-    staff_id: int
-    staff_name: str
-    latitude: str | None = None
-    longitude: str | None = None
 
 def hash_pin(pin: str) -> str:
-    return hashlib.sha256(pin.encode("utf-8")).hexdigest()
+    salt = secrets.token_bytes(16)
+    derived = pbkdf2_hmac("sha256", pin.encode(), salt, 210_000)
+    return "pbkdf2_sha256$210000$" + base64.b64encode(salt + derived).decode()
+
+
+def verify_pin(pin: str, encoded: str) -> bool:
+    try:
+        _, rounds, payload = encoded.split("$", 2)
+        raw = base64.b64decode(payload.encode())
+        actual = pbkdf2_hmac("sha256", pin.encode(), raw[:16], int(rounds))
+        return hmac.compare_digest(raw[16:], actual)
+    except (ValueError, TypeError):
+        return False
+
 
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
-    try: yield db
-    finally: db.close()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def audit(db: Session, actor: Staff | None, action: str, resource_type: str, resource_id: int | str, detail: dict | None = None) -> None:
+    db.add(AuditLog(organization_id=actor.organization_id if actor else 0, actor_id=actor.id if actor else None, action=action, resource_type=resource_type, resource_id=str(resource_id), detail=json.dumps(detail or {}, ensure_ascii=False)))
+
+
+def current_staff(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> Staff:
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        staff_id, organization_id = int(payload["sub"]), int(payload["org"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "認証情報が無効です")
+    staff = db.get(Staff, staff_id)
+    if not staff or not staff.is_active or staff.organization_id != organization_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "ログインし直してください")
+    return staff
+
+
+def require_roles(*roles: str):
+    def dependency(actor: Staff = Depends(current_staff)) -> Staff:
+        if actor.role not in roles:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "この操作を行う権限がありません")
+        return actor
+    return dependency
+
+
+def trip_for_org(db: Session, trip_id: int, actor: Staff) -> BusTrip:
+    trip = db.get(BusTrip, trip_id)
+    if not trip or trip.organization_id != actor.organization_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "運行便が見つかりません")
+    return trip
+
+
+def scan_trip(db: Session, actor: Staff, trip_id: int, qr_token: str, event_type: str) -> dict:
+    trip = trip_for_org(db, trip_id, actor)
+    if trip.status != "運行中":
+        raise HTTPException(status.HTTP_409_CONFLICT, "この便は完了しています")
+    child = db.query(Child).filter_by(organization_id=actor.organization_id, qr_token=qr_token).first()
+    if not child:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "QRコードが登録されていません")
+    attendance = db.query(TripAttendance).filter_by(trip_id=trip.id, child_id=child.id).first()
+    if not attendance:
+        attendance = TripAttendance(trip_id=trip.id, child_id=child.id)
+        db.add(attendance)
+    now = datetime.now(timezone.utc)
+    if event_type == "乗車":
+        if attendance.boarded_at:
+            raise HTTPException(status.HTTP_409_CONFLICT, "この園児はすでに乗車済みです")
+        attendance.boarded_at, attendance.boarded_by = now, actor.name
+    else:
+        if not attendance.boarded_at:
+            raise HTTPException(status.HTTP_409_CONFLICT, "乗車記録がないため降車できません")
+        if attendance.alighted_at:
+            raise HTTPException(status.HTTP_409_CONFLICT, "この園児はすでに降車済みです")
+        attendance.alighted_at, attendance.alighted_by = now, actor.name
+    audit(db, actor, f"trip.{event_type}", "trip", trip.id, {"child_id": child.id})
+    return {"child": child.name, "event_type": event_type, "trip_id": trip.id}
+
+
+def trip_summary(db: Session, trip: BusTrip) -> dict:
+    rows = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip.id).all()
+    children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at} for a, c in rows]
+    boarded = sum(x["boarded_at"] is not None for x in children)
+    alighted = sum(x["alighted_at"] is not None for x in children)
+    return {"trip_id": trip.id, "status": trip.status, "boarded": boarded, "alighted": alighted, "unconfirmed": boarded - alighted, "children": children}
+
 
 def seed(db: Session) -> None:
-    if db.query(Staff).count() == 0:
-        db.add_all([Staff(name="田中 先生", role="運転担当", pin_hash=hash_pin("1234")), Staff(name="佐藤 先生", role="第三者確認", pin_hash=hash_pin("5678"))])
-    if db.query(Vehicle).count() == 0:
-        db.add(Vehicle(name="2号車", plate_number="品川 500 あ 1234"))
-    db.commit()
-    if db.query(BusRoute).count() == 0:
-        vehicle = db.query(Vehicle).first()
-        db.add(BusRoute(name="ひまわり園 送迎便", direction="帰り", vehicle_id=vehicle.id if vehicle else None))
-    if db.query(Child).count() == 0:
-        db.add_all([Child(name="さくら ちゃん", class_name="年少", qr_token="child-sakura"), Child(name="はると くん", class_name="年長", qr_token="child-haruto")])
+    if db.query(Organization).count():
+        return
+    org = Organization(name="デモ園")
+    db.add(org); db.flush()
+    db.add_all([
+        Staff(organization_id=org.id, name="田中 先生", role="operator", password_hash=hash_pin("1234")),
+        Staff(organization_id=org.id, name="佐藤 先生", role="verifier", password_hash=hash_pin("5678")),
+        Staff(organization_id=org.id, name="管理者", role="admin", password_hash=hash_pin("admin1234")),
+        Vehicle(organization_id=org.id, name="2号車", plate_number="品川 500 あ 1234"),
+        Child(organization_id=org.id, name="さくら ちゃん", class_name="年少", qr_token="child-sakura"),
+        Child(organization_id=org.id, name="はると くん", class_name="年長", qr_token="child-haruto"),
+    ])
+    db.flush()
+    vehicle = db.query(Vehicle).filter_by(organization_id=org.id).first()
+    db.add(BusRoute(organization_id=org.id, name="ひまわり園 送迎便", direction="帰り", vehicle_id=vehicle.id))
     db.commit()
 
-app = FastAPI(title="まもるバス API", version="0.2.0")
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
+
+app = FastAPI(title="まもるバス API", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 @app.on_event("startup")
 def setup() -> None:
     Base.metadata.create_all(engine)
-    with SessionLocal() as db: seed(db)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    with SessionLocal() as db:
+        seed(db)
 
 @app.get("/health")
-def health() -> dict[str, str]: return {"status": "ok"}
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+@app.post("/api/auth/login")
+def login(data: LoginIn, db: Session = Depends(get_db)) -> dict:
+    staff = db.get(Staff, data.staff_id)
+    if not staff or not staff.is_active or not verify_pin(data.pin, staff.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "職員IDまたはPINが正しくありません")
+    expires = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES)
+    token = jwt.encode({"sub": str(staff.id), "org": staff.organization_id, "role": staff.role, "exp": expires}, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    audit(db, staff, "auth.login", "staff", staff.id); db.commit()
+    return {"access_token": token, "token_type": "bearer", "staff": {"id": staff.id, "name": staff.name, "role": staff.role}, "expires_at": expires}
+
+@app.get("/api/auth/me")
+def me(actor: Staff = Depends(current_staff)) -> dict:
+    return {"id": actor.id, "name": actor.name, "role": actor.role, "organization_id": actor.organization_id}
 
 @app.get("/api/bootstrap")
-def bootstrap(db: Session = Depends(get_db)) -> dict:
-    return {"children": db.query(Child).all(), "staff": db.query(Staff).all(), "vehicles": db.query(Vehicle).all(), "routes": db.query(BusRoute).all()}
+def bootstrap(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
+    oid = actor.organization_id
+    return {"children": db.query(Child).filter_by(organization_id=oid).all(), "staff": db.query(Staff).filter_by(organization_id=oid).all(), "vehicles": db.query(Vehicle).filter_by(organization_id=oid).all(), "routes": db.query(BusRoute).filter_by(organization_id=oid).all()}
 
 @app.get("/api/children")
-def list_children(db: Session = Depends(get_db)): return db.query(Child).order_by(Child.name).all()
+def list_children(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    return db.query(Child).filter_by(organization_id=actor.organization_id).order_by(Child.name).all()
 @app.post("/api/children", status_code=status.HTTP_201_CREATED)
-def create_child(data: ChildCreate, db: Session = Depends(get_db)):
-    if db.query(Child).filter_by(qr_token=data.qr_token).first(): raise HTTPException(409, "このQRコードは登録済みです")
-    item = Child(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
+def create_child(data: ChildCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    if db.query(Child).filter_by(organization_id=actor.organization_id, qr_token=data.qr_token).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "このQRコードは登録済みです")
+    item = Child(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "child.create", "child", item.id); db.commit(); db.refresh(item); return item
 
 @app.get("/api/staff")
-def list_staff(db: Session = Depends(get_db)): return db.query(Staff).order_by(Staff.name).all()
+def list_staff(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    return db.query(Staff).filter_by(organization_id=actor.organization_id).order_by(Staff.name).all()
 @app.post("/api/staff", status_code=status.HTTP_201_CREATED)
-def create_staff(data: StaffCreate, db: Session = Depends(get_db)):
-    item = Staff(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
+def create_staff(data: StaffCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = Staff(organization_id=actor.organization_id, name=data.name, role=data.role, password_hash=hash_pin(data.pin)); db.add(item); db.flush(); audit(db, actor, "staff.create", "staff", item.id); db.commit(); return {"id": item.id, "name": item.name, "role": item.role}
 
 @app.get("/api/vehicles")
-def list_vehicles(db: Session = Depends(get_db)): return db.query(Vehicle).order_by(Vehicle.name).all()
+def list_vehicles(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    return db.query(Vehicle).filter_by(organization_id=actor.organization_id).order_by(Vehicle.name).all()
 @app.post("/api/vehicles", status_code=status.HTTP_201_CREATED)
-def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db)):
-    if db.query(Vehicle).filter_by(name=data.name).first(): raise HTTPException(409, "この車両名は登録済みです")
-    item = Vehicle(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
+def create_vehicle(data: VehicleCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = Vehicle(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "vehicle.create", "vehicle", item.id); db.commit(); return item
 
 @app.get("/api/routes")
-def list_routes(db: Session = Depends(get_db)): return db.query(BusRoute).order_by(BusRoute.name).all()
+def list_routes(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    return db.query(BusRoute).filter_by(organization_id=actor.organization_id).order_by(BusRoute.name).all()
 @app.post("/api/routes", status_code=status.HTTP_201_CREATED)
-def create_route(data: RouteCreate, db: Session = Depends(get_db)):
-    if data.vehicle_id and not db.get(Vehicle, data.vehicle_id): raise HTTPException(404, "車両が見つかりません")
-    item = BusRoute(**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return item
+def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
+    item = BusRoute(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "route.create", "route", item.id); db.commit(); return item
 
 @app.post("/api/trips", status_code=status.HTTP_201_CREATED)
-def create_trip(data: TripCreate, db: Session = Depends(get_db)):
-    trip = BusTrip(**data.model_dump()); db.add(trip); db.commit(); db.refresh(trip); return trip
+def create_trip(data: TripCreate, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    if data.route_id and not db.query(BusRoute).filter_by(id=data.route_id, organization_id=actor.organization_id).first(): raise HTTPException(404, "便が見つかりません")
+    if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first(): raise HTTPException(404, "車両が見つかりません")
+    trip = BusTrip(organization_id=actor.organization_id, **data.model_dump()); db.add(trip); db.flush(); audit(db, actor, "trip.create", "trip", trip.id); db.commit(); db.refresh(trip); return trip
+
+@app.get("/api/trips")
+def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    query = db.query(BusTrip).filter_by(organization_id=actor.organization_id)
+    if from_at: query = query.filter(BusTrip.started_at >= from_at)
+    if to_at: query = query.filter(BusTrip.started_at <= to_at)
+    return [trip_summary(db, trip) | {"started_at": trip.started_at, "completed_at": trip.completed_at, "direction": trip.direction} for trip in query.order_by(BusTrip.started_at.desc()).limit(200)]
 
 @app.post("/api/trips/{trip_id}/scans")
-def trip_scan(trip_id: int, data: TripScanIn, db: Session = Depends(get_db)):
-    trip = db.get(BusTrip, trip_id)
-    staff = db.get(Staff, data.staff_id)
-    child = db.query(Child).filter_by(qr_token=data.qr_token).first()
-    if not trip: raise HTTPException(404, "運行便が見つかりません")
-    if trip.status != "運行中": raise HTTPException(409, "この便は完了しています")
-    if not staff or staff.name != data.staff_name: raise HTTPException(401, "ログイン状態を確認してください")
-    if not child: raise HTTPException(404, "QRコードが登録されていません")
-    attendance = db.query(TripAttendance).filter_by(trip_id=trip_id, child_id=child.id).first()
-    if not attendance: attendance = TripAttendance(trip_id=trip_id, child_id=child.id); db.add(attendance)
-    now = datetime.now(timezone.utc)
-    if data.event_type == "乗車":
-        if attendance.boarded_at: raise HTTPException(409, "この園児はすでに乗車済みです")
-        attendance.boarded_at, attendance.boarded_by = now, staff.name
-    else:
-        if not attendance.boarded_at: raise HTTPException(409, "乗車記録がないため降車できません")
-        if attendance.alighted_at: raise HTTPException(409, "この園児はすでに降車済みです")
-        attendance.alighted_at, attendance.alighted_by = now, staff.name
-    db.commit(); return {"child": child.name, "event_type": data.event_type, "trip_id": trip_id}
-
+def trip_scan(trip_id: int, data: TripScanIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    result = scan_trip(db, actor, trip_id, data.qr_token, data.event_type); db.commit(); return result
 @app.get("/api/trips/{trip_id}/status")
-def trip_status(trip_id: int, db: Session = Depends(get_db)):
-    trip = db.get(BusTrip, trip_id)
-    if not trip: raise HTTPException(404, "運行便が見つかりません")
-    rows = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip_id).all()
-    children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at} for a,c in rows]
-    boarded = sum(1 for x in children if x["boarded_at"]); alighted = sum(1 for x in children if x["alighted_at"])
-    return {"trip_id": trip_id, "status": trip.status, "boarded": boarded, "alighted": alighted, "unconfirmed": boarded-alighted, "children": children}
-
+def trip_status(trip_id: int, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    return trip_summary(db, trip_for_org(db, trip_id, actor))
+@app.post("/api/trips/{trip_id}/third-party-approval")
+def third_party_approval(trip_id: int, data: ThirdApprovalIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    trip = trip_for_org(db, trip_id, actor)
+    verifier = db.query(Staff).filter_by(id=data.staff_id, organization_id=actor.organization_id, is_active=True).first()
+    if not verifier or verifier.role not in {"verifier", "admin"} or not verify_pin(data.pin, verifier.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "第三者確認者の認証に失敗しました")
+    driver_names = {row[0] for row in db.query(TripAttendance.boarded_by).filter_by(trip_id=trip.id).all() if row[0]}
+    if verifier.name in driver_names:
+        raise HTTPException(status.HTTP_409_CONFLICT, "運転担当者本人は第三者確認できません")
+    item = VehicleSafetyCheck(organization_id=actor.organization_id, trip_id=trip.id, check_type="third_party", staff_id=verifier.id, staff_name=verifier.name, qr_token="third-party-confirmed")
+    db.add(item); db.flush(); audit(db, verifier, "trip.third_party_approval", "trip", trip.id, {"requested_by": actor.id}); db.commit()
+    return {"id": item.id, "verifier": verifier.name, "recorded_at": item.created_at}
 @app.post("/api/trips/{trip_id}/complete")
-def complete_trip(trip_id: int, db: Session = Depends(get_db)):
-    summary = trip_status(trip_id, db)
-    if summary["unconfirmed"]: raise HTTPException(409, "未降車の園児がいるため完了できません")
-    trip = db.get(BusTrip, trip_id); trip.status="完了"; trip.completed_at=datetime.now(timezone.utc); db.commit(); return {"status":"完了"}
-@app.post("/api/notifications", status_code=status.HTTP_201_CREATED)
-def queue_notification(data: NotificationIn, db: Session = Depends(get_db)):
-    item = NotificationQueue(**data.model_dump()); db.add(item); db.commit(); db.refresh(item)
-    return {"id": item.id, "status": item.status, "created_at": item.created_at}
+def complete_trip(trip_id: int, actor: Staff = Depends(require_roles("operator", "admin")), db: Session = Depends(get_db)):
+    trip = trip_for_org(db, trip_id, actor); summary = trip_summary(db, trip)
+    if summary["unconfirmed"]: raise HTTPException(status.HTTP_409_CONFLICT, "未降車の園児がいるため完了できません")
+    checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="tail_qr").count()
+    if not checks: raise HTTPException(status.HTTP_409_CONFLICT, "最後尾確認が必要です")
+    approvals = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="third_party").count()
+    if not approvals: raise HTTPException(status.HTTP_409_CONFLICT, "第三者確認が必要です")
+    trip.status = "完了"; trip.completed_at = datetime.now(timezone.utc); audit(db, actor, "trip.complete", "trip", trip.id); db.commit(); return {"status": "完了"}
 
-@app.get("/api/notifications")
-def list_notifications(db: Session = Depends(get_db)):
-    return db.query(NotificationQueue).order_by(NotificationQueue.created_at.desc()).limit(100).all()
 @app.post("/api/vehicle-checks", status_code=status.HTTP_201_CREATED)
-def vehicle_check(data: VehicleCheckIn, db: Session = Depends(get_db)):
-    staff = db.get(Staff, data.staff_id)
-    if not staff or staff.name != data.staff_name: raise HTTPException(401, "ログイン状態を確認してください")
-    item = VehicleSafetyCheck(**data.model_dump()); db.add(item); db.commit(); db.refresh(item)
-    return {"id": item.id, "check_type": item.check_type, "recorded_at": item.created_at}
-@app.post("/api/auth/login")
-def login(data: LoginIn, db: Session = Depends(get_db)):
-    staff = db.get(Staff, data.staff_id)
-    if not staff or staff.pin_hash != hash_pin(data.pin):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="職員IDまたはPINが正しくありません")
-    return {"id": staff.id, "name": staff.name, "role": staff.role}
+def vehicle_check(data: VehicleCheckIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    if data.trip_id: trip_for_org(db, data.trip_id, actor)
+    item = VehicleSafetyCheck(organization_id=actor.organization_id, staff_id=actor.id, staff_name=actor.name, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "vehicle_check.create", "vehicle_check", item.id); db.commit(); return {"id": item.id, "recorded_at": item.created_at}
 
-@app.get("/api/rides/status")
-def ride_status(db: Session = Depends(get_db)):
-    result = []
-    for child in db.query(Child).order_by(Child.name):
-        latest = db.query(SafetyEvent).filter_by(child_id=child.id).order_by(SafetyEvent.created_at.desc()).first()
-        result.append({"id": child.id, "name": child.name, "class_name": child.class_name, "qr_token": child.qr_token, "state": latest.event_type if latest else "未確認"})
-    return result
-@app.post("/api/scans")
-def scan(data: ScanIn, db: Session = Depends(get_db)):
-    staff = db.get(Staff, data.staff_id)
-    if not staff or staff.name != data.staff_name: raise HTTPException(401, "ログイン状態を確認してください")
-    child = db.query(Child).filter_by(qr_token=data.qr_token).first()
-    if not child: raise HTTPException(404, "QRコードが登録されていません")
-    event = SafetyEvent(child_id=child.id, event_type=data.event_type, staff_name=data.staff_name, latitude=data.latitude, longitude=data.longitude)
-    db.add(event); db.commit(); db.refresh(event)
-    return {"child": child.name, "event_id": event.id, "recorded_at": event.created_at}
+@app.post("/api/notifications", status_code=status.HTTP_201_CREATED)
+def queue_notification(data: NotificationIn, actor: Staff = Depends(require_roles("admin", "operator")), db: Session = Depends(get_db)):
+    item = NotificationQueue(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "notification.queue", "notification", item.id); db.commit(); return {"id": item.id, "status": item.status}
+@app.get("/api/notifications")
+def list_notifications(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    return db.query(NotificationQueue).filter_by(organization_id=actor.organization_id).order_by(NotificationQueue.created_at.desc()).limit(100).all()
+@app.post("/api/notifications/{notification_id}/dispatch")
+def dispatch_notification(notification_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = db.query(NotificationQueue).filter_by(id=notification_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(404, "通知が見つかりません")
+    url = os.getenv("NOTIFICATION_WEBHOOK_URL")
+    if not url: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "NOTIFICATION_WEBHOOK_URL が未設定です")
+    try:
+        req = Request(url, data=json.dumps({"recipient": item.recipient, "message": item.message, "channel": item.channel}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=10) as response: item.provider_response = f"HTTP {response.status}"
+        item.status, item.sent_at = "sent", datetime.now(timezone.utc)
+    except (URLError, OSError) as exc:
+        item.status, item.provider_response = "failed", str(exc)
+    audit(db, actor, "notification.dispatch", "notification", item.id, {"status": item.status}); db.commit(); return {"id": item.id, "status": item.status}
 
+@app.get("/api/audit-logs")
+def audit_logs(action: str | None = None, limit: int = 100, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    query = db.query(AuditLog).filter_by(organization_id=actor.organization_id)
+    if action: query = query.filter(AuditLog.action == action)
+    return query.order_by(AuditLog.created_at.desc()).limit(min(limit, 500)).all()
 
+@app.post("/api/sync")
+def sync(data: SyncIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    results = []
+    for event in data.events:
+        prior = db.query(SyncEvent).filter_by(organization_id=actor.organization_id, client_event_id=event.client_event_id).first()
+        if prior:
+            results.append({"client_event_id": event.client_event_id, "outcome": "already_processed"}); continue
+        try:
+            scan_trip(db, actor, event.trip_id, event.qr_token, event.event_type)
+            outcome = "applied"
+        except HTTPException as exc:
+            outcome = f"rejected:{exc.detail}"
+        db.add(SyncEvent(organization_id=actor.organization_id, client_event_id=event.client_event_id, outcome=outcome)); results.append({"client_event_id": event.client_event_id, "outcome": outcome})
+    db.commit(); return {"results": results}
 
+@app.post("/api/trips/{trip_id}/videos", status_code=status.HTTP_201_CREATED)
+async def upload_video(trip_id: int, file: UploadFile = File(...), actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    trip_for_org(db, trip_id, actor)
+    if not (file.content_type or "").startswith("video/"): raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "動画ファイルを指定してください")
+    suffix = Path(file.filename or "video.mp4").suffix[:10] or ".mp4"
+    key = f"{actor.organization_id}/{uuid4()}{suffix}"
+    target = UPLOAD_DIR / key; target.parent.mkdir(parents=True, exist_ok=True)
+    size = 0
+    with target.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > 100 * 1024 * 1024: out.close(); target.unlink(missing_ok=True); raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "動画は100MB以下にしてください")
+            out.write(chunk)
+    item = VideoEvidence(organization_id=actor.organization_id, trip_id=trip_id, uploaded_by=actor.id, file_name=file.filename or "video", storage_key=key, content_type=file.content_type or "video/mp4")
+    db.add(item); db.flush(); audit(db, actor, "video.upload", "video", item.id, {"size": size}); db.commit(); return {"id": item.id, "ai_status": item.ai_status}
 
-
-
+@app.post("/api/videos/{video_id}/analyze")
+def analyze_video(video_id: int, actor: Staff = Depends(require_roles("admin", "verifier")), db: Session = Depends(get_db)):
+    item = db.query(VideoEvidence).filter_by(id=video_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(404, "動画が見つかりません")
+    item.ai_status, item.ai_result = "pending_provider", "AIプロバイダー未接続: 人による目視確認が必要です"
+    audit(db, actor, "video.analyze.request", "video", item.id); db.commit(); return {"id": item.id, "ai_status": item.ai_status, "ai_result": item.ai_result}
