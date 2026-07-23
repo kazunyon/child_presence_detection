@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from hashlib import pbkdf2_hmac
+from hashlib import pbkdf2_hmac, sha256
 import base64
 import hmac
 import json
@@ -11,10 +11,10 @@ from pathlib import Path
 import secrets
 from typing import Generator, Literal
 from urllib.error import URLError
-from urllib.request import Request, urlopen
-from uuid import uuid4
+from urllib.request import Request as UrlRequest, urlopen
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -30,6 +30,9 @@ JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-me")
 JWT_ALGORITHM = "HS256"
 TOKEN_MINUTES = int(os.getenv("TOKEN_EXPIRE_MINUTES", "480"))
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_ORGANIZATION_ID = int(os.getenv("LINE_ORGANIZATION_ID", "0"))
 security = HTTPBearer()
 
 
@@ -134,6 +137,16 @@ class NotificationQueue(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class LineContact(Base):
+    __tablename__ = "line_contacts"
+    __table_args__ = (UniqueConstraint("organization_id", "line_user_id", name="uq_line_contact_org_user"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    line_user_id: Mapped[str] = mapped_column(String(100))
+    display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -206,7 +219,7 @@ class NotificationIn(BaseModel):
     recipient_type: str
     recipient: str
     message: str = Field(max_length=500)
-    channel: Literal["webhook", "email", "sms", "push"] = "webhook"
+    channel: Literal["line", "webhook", "email", "sms", "push"] = "line"
 class ThirdApprovalIn(BaseModel):
     staff_id: int
     pin: str = Field(min_length=4, max_length=128)
@@ -445,20 +458,61 @@ def queue_notification(data: NotificationIn, actor: Staff = Depends(require_role
 @app.get("/api/notifications")
 def list_notifications(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     return db.query(NotificationQueue).filter_by(organization_id=actor.organization_id).order_by(NotificationQueue.created_at.desc()).limit(100).all()
+def dispatch_line(item: NotificationQueue) -> str:
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です")
+    payload = {"to": item.recipient, "messages": [{"type": "text", "text": item.message}]}
+    request = UrlRequest(
+        "https://api.line.me/v2/bot/message/push",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "X-Line-Retry-Key": str(uuid5(NAMESPACE_URL, f"mamoru-notification:{item.id}"))},
+        method="POST",
+    )
+    with urlopen(request, timeout=10) as response:
+        return f"LINE HTTP {response.status}"
+
 @app.post("/api/notifications/{notification_id}/dispatch")
 def dispatch_notification(notification_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     item = db.query(NotificationQueue).filter_by(id=notification_id, organization_id=actor.organization_id).first()
     if not item: raise HTTPException(404, "通知が見つかりません")
-    url = os.getenv("NOTIFICATION_WEBHOOK_URL")
-    if not url: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "NOTIFICATION_WEBHOOK_URL が未設定です")
     try:
-        req = Request(url, data=json.dumps({"recipient": item.recipient, "message": item.message, "channel": item.channel}).encode(), headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(req, timeout=10) as response: item.provider_response = f"HTTP {response.status}"
+        if item.channel == "line":
+            item.provider_response = dispatch_line(item)
+        else:
+            url = os.getenv("NOTIFICATION_WEBHOOK_URL")
+            if not url: raise RuntimeError("NOTIFICATION_WEBHOOK_URL が未設定です")
+            request = UrlRequest(url, data=json.dumps({"recipient": item.recipient, "message": item.message, "channel": item.channel}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=10) as response: item.provider_response = f"HTTP {response.status}"
         item.status, item.sent_at = "sent", datetime.now(timezone.utc)
-    except (URLError, OSError) as exc:
-        item.status, item.provider_response = "failed", str(exc)
-    audit(db, actor, "notification.dispatch", "notification", item.id, {"status": item.status}); db.commit(); return {"id": item.id, "status": item.status}
+    except (URLError, OSError, RuntimeError) as exc:
+        item.status, item.provider_response = "failed", str(exc)[:1000]
+    audit(db, actor, "notification.dispatch", "notification", item.id, {"status": item.status, "channel": item.channel}); db.commit(); return {"id": item.id, "status": item.status}
 
+@app.post("/api/integrations/line/webhook", status_code=status.HTTP_200_OK)
+async def line_webhook(request: Request, db: Session = Depends(get_db)) -> None:
+    if not LINE_CHANNEL_SECRET or not LINE_ORGANIZATION_ID:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "LINE連携が未設定です")
+    body = await request.body()
+    signature = request.headers.get("X-Line-Signature", "")
+    expected = base64.b64encode(hmac.new(LINE_CHANNEL_SECRET.encode(), body, sha256).digest()).decode()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "LINE署名が不正です")
+    for event in json.loads(body.decode("utf-8")).get("events", []):
+        user_id = event.get("source", {}).get("userId")
+        if not user_id: continue
+        contact = db.query(LineContact).filter_by(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id).first()
+        if event.get("type") == "unfollow":
+            if contact: contact.is_active = False
+            continue
+        if not contact:
+            db.add(LineContact(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id))
+        else:
+            contact.is_active = True
+    db.commit()
+
+@app.get("/api/integrations/line/contacts")
+def list_line_contacts(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    return db.query(LineContact).filter_by(organization_id=actor.organization_id, is_active=True).order_by(LineContact.created_at.desc()).all()
 @app.get("/api/audit-logs")
 def audit_logs(action: str | None = None, limit: int = 100, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     query = db.query(AuditLog).filter_by(organization_id=actor.organization_id)

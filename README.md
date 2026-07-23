@@ -116,6 +116,17 @@ uvicorn main:app --reload --port 8000
 
 フロントエンドは、環境変数 `VITE_API_BASE_URL` でFastAPIのURLを指定できます。未指定時は `http://127.0.0.1:8000` を使用します。
 
+## LINE通知の設定
+
+LINE Messaging APIのPush通知を実装しています。LINE公式アカウントを友だち追加した保護者・職員のLINEユーザーIDを、署名検証済みWebhookから園ごとに登録し、そのIDを宛先として通知を送ります。
+
+1. LINE DevelopersでLINE公式アカウントに紐付くMessaging APIチャネルを作成します。
+2. Renderへデプロイ後、Webhook URLを `https://<APIのURL>/api/integrations/line/webhook` に設定してWebhookを有効化します。
+3. Renderの環境変数へ `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_ORGANIZATION_ID` を登録します。トークンとSecretをGitやブラウザへ保存してはいけません。
+4. 保護者または職員が公式アカウントを友だち追加すると、WebhookでLINEユーザーIDが登録されます。管理者は `GET /api/integrations/line/contacts` で登録済みの宛先を確認できます。
+5. 通知は `channel: "line"`、宛先に登録済みのLINEユーザーID（`U`で始まる値）を指定してキューへ入れ、管理者が `POST /api/notifications/{id}/dispatch` を実行すると送信されます。
+
+LINEの設定が未完了の場合、通知は送信済みにならず `failed` として記録されます。テスト時は実在する保護者へ送らず、専用のテスト用LINEアカウントを使ってください。
 ## GitHub Pagesへの公開
 
 `main` ブランチへ変更を反映すると、GitHub Actionsがフロントエンドをビルドし、GitHub Pagesへ公開します。
