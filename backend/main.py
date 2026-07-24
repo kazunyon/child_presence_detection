@@ -248,6 +248,9 @@ class TripCreate(BaseModel):
 class TripScanIn(BaseModel):
     qr_token: str
     event_type: Literal["乗車", "降車"]
+class ManualAttendanceIn(BaseModel):
+    child_id: int
+    event_type: Literal['乗車', '降車']
 class VehicleCheckIn(BaseModel):
     trip_id: int | None = None
     check_type: str = Field(min_length=1, max_length=40)
@@ -379,7 +382,7 @@ def trip_summary(db: Session, trip: BusTrip) -> dict:
     route = db.query(BusRoute).filter_by(id=trip.route_id, organization_id=trip.organization_id).first() if trip.route_id else None
     vehicle = db.query(Vehicle).filter_by(id=trip.vehicle_id, organization_id=trip.organization_id).first() if trip.vehicle_id else None
     rows = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip.id).all()
-    children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at} for a, c in rows]
+    children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at, "boarded_manually": bool(a.boarded_by and "（QRなし）" in a.boarded_by), "alighted_manually": bool(a.alighted_by and "（QRなし）" in a.alighted_by)} for a, c in rows]
     boarded = sum(x["boarded_at"] is not None for x in children)
     alighted = sum(x["alighted_at"] is not None for x in children)
     check_types = {row[0] for row in db.query(VehicleSafetyCheck.check_type).filter_by(organization_id=trip.organization_id, trip_id=trip.id).all()}
@@ -703,6 +706,30 @@ def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, s
 @app.post("/api/trips/{trip_id}/scans")
 def trip_scan(trip_id: int, data: TripScanIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     result = scan_trip(db, actor, trip_id, data.qr_token, data.event_type); db.commit(); return result
+@app.post("/api/trips/{trip_id}/manual-attendance")
+def manual_trip_attendance(trip_id: int, data: ManualAttendanceIn, actor: Staff = Depends(require_roles("operator", "admin")), db: Session = Depends(get_db)):
+    """Record a witnessed boarding/alighting when the child's QR code is unavailable."""
+    trip = trip_for_org(db, trip_id, actor)
+    if trip.status != "運行中":
+        raise HTTPException(status.HTTP_409_CONFLICT, "この送迎は完了しています")
+    attendance = db.query(TripAttendance).filter_by(trip_id=trip.id, child_id=data.child_id).first()
+    child = db.query(Child).filter_by(id=data.child_id, organization_id=actor.organization_id).first()
+    if not attendance or not child:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "この園児は当日の名簿にいません")
+    now = datetime.now(timezone.utc)
+    if data.event_type == "乗車":
+        if attendance.boarded_at:
+            raise HTTPException(status.HTTP_409_CONFLICT, "この園児はすでに乗車済みです")
+        attendance.boarded_at, attendance.boarded_by = now, f"{actor.name}（QRなし）"
+    else:
+        if not attendance.boarded_at:
+            raise HTTPException(status.HTTP_409_CONFLICT, "乗車記録がないため降車できません")
+        if attendance.alighted_at:
+            raise HTTPException(status.HTTP_409_CONFLICT, "この園児はすでに降車済みです")
+        attendance.alighted_at, attendance.alighted_by = now, f"{actor.name}（QRなし）"
+    audit(db, actor, f"trip.manual_{data.event_type}", "trip", trip.id, {"child_id": child.id, "child_name": child.name, "reason": "qr_unavailable"})
+    db.commit()
+    return trip_summary(db, trip)
 @app.get("/api/trips/{trip_id}/status")
 def trip_status(trip_id: int, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     return trip_summary(db, trip_for_org(db, trip_id, actor))
