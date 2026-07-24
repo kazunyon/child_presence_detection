@@ -477,6 +477,7 @@ def reset_admin_pin(data: AdminPinRecoveryIn, x_admin_recovery_token: str | None
             raise HTTPException(status.HTTP_409_CONFLICT, "復旧先の園情報が見つかりません")
         staff = Staff(id=3, organization_id=organization.id, name="管理者", role="admin", password_hash=hash_pin(data.new_pin), is_active=True)
         db.add(staff)
+        db.flush()
     else:
         staff.role = "admin"
         staff.password_hash, staff.is_active = hash_pin(data.new_pin), True
