@@ -639,9 +639,11 @@ def update_vehicle(vehicle_id: int, data: VehicleUpdate, actor: Staff = Depends(
     for key, value in values.items(): setattr(item, key, value)
     audit(db, actor, "vehicle.update", "vehicle", item.id, values); db.commit(); return item
 
+@app.get("/api/bus-routes")
 @app.get("/api/routes")
 def list_routes(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     return [route_public(db, item) for item in db.query(BusRoute).filter_by(organization_id=actor.organization_id).order_by(BusRoute.name).all()]
+@app.post("/api/bus-routes", status_code=status.HTTP_201_CREATED)
 @app.post("/api/routes", status_code=status.HTTP_201_CREATED)
 def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first(): raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
@@ -649,6 +651,7 @@ def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin"
     item = BusRoute(organization_id=actor.organization_id, **values); db.add(item); db.flush()
     replace_route_roster(db, actor, item, data.child_ids)
     audit(db, actor, "route.create", "route", item.id, {"child_ids": data.child_ids}); db.commit(); return route_public(db, item)
+@app.put("/api/bus-routes/{route_id}")
 @app.put("/api/routes/{route_id}")
 def update_route(route_id: int, data: RouteUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     item = db.query(BusRoute).filter_by(id=route_id, organization_id=actor.organization_id).first()
