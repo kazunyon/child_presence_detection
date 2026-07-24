@@ -479,8 +479,9 @@ def reset_admin_pin(data: AdminPinRecoveryIn, x_admin_recovery_token: str | None
         # Use it only when it exists; authentication uses password_hash.
         password_hash = hash_pin(data.new_pin)
         legacy_columns = {column["name"] for column in inspect(engine).get_columns("staff")}
-        if "pin" in legacy_columns:
-            db.execute(text("INSERT INTO staff (id, organization_id, name, role, password_hash, is_active, pin) VALUES (:id, :organization_id, :name, :role, :password_hash, :is_active, :legacy_pin)"), {"id": 3, "organization_id": organization.id, "name": "管理者", "role": "admin", "password_hash": password_hash, "is_active": True, "legacy_pin": sha256(data.new_pin.encode()).hexdigest()})
+        legacy_pin_column = next((name for name in ("pin_hash", "pin") if name in legacy_columns), None)
+        if legacy_pin_column:
+            db.execute(text(f"INSERT INTO staff (id, organization_id, name, role, password_hash, is_active, {legacy_pin_column}) VALUES (:id, :organization_id, :name, :role, :password_hash, :is_active, :legacy_pin)"), {"id": 3, "organization_id": organization.id, "name": "管理者", "role": "admin", "password_hash": password_hash, "is_active": True, "legacy_pin": sha256(data.new_pin.encode()).hexdigest()})
             staff = db.get(Staff, 3)
         else:
             staff = Staff(id=3, organization_id=organization.id, name="管理者", role="admin", password_hash=password_hash, is_active=True)
