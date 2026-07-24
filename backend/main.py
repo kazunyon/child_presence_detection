@@ -14,7 +14,7 @@ from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -159,6 +159,13 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class AdminPinRecovery(Base):
+    __tablename__ = "admin_pin_recoveries"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    used_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class SyncEvent(Base):
     __tablename__ = "sync_events"
     __table_args__ = (UniqueConstraint("organization_id", "client_event_id", name="uq_sync_org_event"),)
@@ -241,6 +248,10 @@ class NotificationIn(BaseModel):
 class ThirdApprovalIn(BaseModel):
     staff_id: int
     pin: str = Field(min_length=4, max_length=128)
+
+class AdminPinRecoveryIn(BaseModel):
+    staff_id: int = 3
+    new_pin: str = Field(min_length=8, max_length=128)
 
 class SyncItem(BaseModel):
     client_event_id: str = Field(min_length=1, max_length=80)
@@ -445,6 +456,24 @@ def login(data: LoginIn, db: Session = Depends(get_db)) -> dict:
     token = jwt.encode({"sub": str(staff.id), "org": staff.organization_id, "role": staff.role, "exp": expires}, JWT_SECRET, algorithm=JWT_ALGORITHM)
     audit(db, staff, "auth.login", "staff", staff.id); db.commit()
     return {"access_token": token, "token_type": "bearer", "staff": {"id": staff.id, "name": staff.name, "role": staff.role}, "expires_at": expires}
+
+@app.post("/api/admin-recovery/reset-pin")
+def reset_admin_pin(data: AdminPinRecoveryIn, x_admin_recovery_token: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict:
+    """One-time emergency recovery. Enable only with a Render secret, then remove it."""
+    configured_token = os.getenv("ADMIN_PIN_RECOVERY_TOKEN")
+    if not configured_token or not x_admin_recovery_token or not hmac.compare_digest(configured_token, x_admin_recovery_token):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "管理者PIN復旧は許可されていません")
+    token_hash = sha256(configured_token.encode()).hexdigest()
+    if db.get(AdminPinRecovery, token_hash):
+        raise HTTPException(status.HTTP_409_CONFLICT, "この復旧トークンは使用済みです。Renderから削除してください")
+    staff = db.get(Staff, data.staff_id)
+    if not staff or staff.role != "admin":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "管理者アカウントが見つかりません")
+    staff.password_hash, staff.is_active = hash_pin(data.new_pin), True
+    db.add(AdminPinRecovery(token_hash=token_hash, staff_id=staff.id))
+    audit(db, staff, "auth.admin_pin_recovery", "staff", staff.id, {"method": "one_time_recovery_token"})
+    db.commit()
+    return {"staff_id": staff.id, "status": "pin_reset"}
 
 @app.get("/api/auth/me")
 def me(actor: Staff = Depends(current_staff)) -> dict:
