@@ -730,6 +730,25 @@ def manual_trip_attendance(trip_id: int, data: ManualAttendanceIn, actor: Staff 
     audit(db, actor, f"trip.manual_{data.event_type}", "trip", trip.id, {"child_id": child.id, "child_name": child.name, "reason": "qr_unavailable"})
     db.commit()
     return trip_summary(db, trip)
+@app.post("/api/trips/{trip_id}/cancel")
+def cancel_unstarted_trip(trip_id: int, actor: Staff = Depends(require_roles("operator", "admin")), db: Session = Depends(get_db)):
+    """Cancel a mistakenly selected route only before any actual safety record exists."""
+    trip = trip_for_org(db, trip_id, actor)
+    if trip.status != "運行中":
+        raise HTTPException(status.HTTP_409_CONFLICT, "この送迎は運行中ではありません")
+    attendance = db.query(TripAttendance).filter_by(trip_id=trip.id).all()
+    has_actual_attendance = any(
+        item.alighted_at or (item.boarded_by and item.boarded_by != "通常名簿")
+        for item in attendance
+    )
+    has_safety_checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id).count() > 0
+    if has_actual_attendance or has_safety_checks:
+        raise HTTPException(status.HTTP_409_CONFLICT, "乗降または安全確認を記録した送迎は中止できません。送迎を再開して完了してください")
+    trip.status = "中止"
+    trip.completed_at = datetime.now(timezone.utc)
+    audit(db, actor, "trip.cancel", "trip", trip.id, {"reason": "vehicle_reselection"})
+    db.commit()
+    return {"status": "中止"}
 @app.get("/api/trips/{trip_id}/status")
 def trip_status(trip_id: int, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     return trip_summary(db, trip_for_org(db, trip_id, actor))
