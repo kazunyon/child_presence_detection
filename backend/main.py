@@ -202,6 +202,24 @@ class RouteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: str = Field(default="往路", max_length=20)
     vehicle_id: int | None = None
+class OrganizationUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+class ChildUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    class_name: str | None = Field(default=None, max_length=50)
+    qr_token: str | None = Field(default=None, min_length=1, max_length=100)
+class StaffUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    role: Literal["admin", "operator", "verifier"] | None = None
+    pin: str | None = Field(default=None, min_length=4, max_length=128)
+    is_active: bool | None = None
+class VehicleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    plate_number: str | None = Field(default=None, max_length=30)
+class RouteUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    direction: str | None = Field(default=None, max_length=20)
+    vehicle_id: int | None = None
 class TripCreate(BaseModel):
     route_id: int | None = None
     vehicle_id: int | None = None
@@ -461,21 +479,56 @@ def bootstrap(actor: Staff = Depends(current_staff), db: Session = Depends(get_d
         "routes": [{"id": item.id, "name": item.name, "direction": item.direction, "vehicle_id": item.vehicle_id} for item in routes],
     }
 
+def staff_public(item: Staff) -> dict:
+    return {"id": item.id, "name": item.name, "role": item.role, "is_active": item.is_active}
+
+@app.get("/api/organization")
+def current_organization(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
+    item = db.get(Organization, actor.organization_id)
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "園情報が見つかりません")
+    return {"id": item.id, "name": item.name, "created_at": item.created_at}
+@app.put("/api/organization")
+def update_organization(data: OrganizationUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    item = db.get(Organization, actor.organization_id)
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "園情報が見つかりません")
+    duplicate = db.query(Organization).filter(Organization.name == data.name, Organization.id != item.id).first()
+    if duplicate: raise HTTPException(status.HTTP_409_CONFLICT, "この園名は登録済みです")
+    item.name = data.name; audit(db, actor, "organization.update", "organization", item.id, {"name": item.name}); db.commit()
+    return {"id": item.id, "name": item.name, "created_at": item.created_at}
+
 @app.get("/api/children")
 def list_children(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     return db.query(Child).filter_by(organization_id=actor.organization_id).order_by(Child.name).all()
 @app.post("/api/children", status_code=status.HTTP_201_CREATED)
 def create_child(data: ChildCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    if db.query(Child).filter_by(organization_id=actor.organization_id, qr_token=data.qr_token).first():
-        raise HTTPException(status.HTTP_409_CONFLICT, "このQRコードは登録済みです")
+    if db.query(Child).filter_by(organization_id=actor.organization_id, qr_token=data.qr_token).first(): raise HTTPException(status.HTTP_409_CONFLICT, "このQRコードは登録済みです")
     item = Child(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "child.create", "child", item.id); db.commit(); db.refresh(item); return item
+@app.put("/api/children/{child_id}")
+def update_child(child_id: int, data: ChildUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = db.query(Child).filter_by(id=child_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "園児が見つかりません")
+    values = data.model_dump(exclude_unset=True)
+    if values.get("qr_token") and db.query(Child).filter(Child.organization_id == actor.organization_id, Child.qr_token == values["qr_token"], Child.id != item.id).first(): raise HTTPException(status.HTTP_409_CONFLICT, "このQRコードは登録済みです")
+    for key, value in values.items(): setattr(item, key, value)
+    audit(db, actor, "child.update", "child", item.id, values); db.commit(); return item
 
 @app.get("/api/staff")
 def list_staff(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    return db.query(Staff).filter_by(organization_id=actor.organization_id).order_by(Staff.name).all()
+    return [staff_public(item) for item in db.query(Staff).filter_by(organization_id=actor.organization_id).order_by(Staff.name).all()]
 @app.post("/api/staff", status_code=status.HTTP_201_CREATED)
 def create_staff(data: StaffCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    item = Staff(organization_id=actor.organization_id, name=data.name, role=data.role, password_hash=hash_pin(data.pin)); db.add(item); db.flush(); audit(db, actor, "staff.create", "staff", item.id); db.commit(); return {"id": item.id, "name": item.name, "role": item.role}
+    item = Staff(organization_id=actor.organization_id, name=data.name, role=data.role, password_hash=hash_pin(data.pin)); db.add(item); db.flush(); audit(db, actor, "staff.create", "staff", item.id); db.commit(); return staff_public(item)
+@app.put("/api/staff/{staff_id}")
+def update_staff(staff_id: int, data: StaffUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = db.query(Staff).filter_by(id=staff_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "職員が見つかりません")
+    values = data.model_dump(exclude_unset=True)
+    removes_admin = item.role == "admin" and (values.get("role") not in (None, "admin") or values.get("is_active") is False)
+    if removes_admin and db.query(Staff).filter_by(organization_id=actor.organization_id, role="admin", is_active=True).count() <= 1: raise HTTPException(status.HTTP_409_CONFLICT, "最後の管理者は変更・無効化できません")
+    if item.id == actor.id and values.get("is_active") is False: raise HTTPException(status.HTTP_409_CONFLICT, "自分自身は無効化できません")
+    if "pin" in values: item.password_hash = hash_pin(values.pop("pin"))
+    for key, value in values.items(): setattr(item, key, value)
+    audit(db, actor, "staff.update", "staff", item.id, {key: value for key, value in values.items() if key != "pin"}); db.commit(); return staff_public(item)
 
 @app.get("/api/vehicles")
 def list_vehicles(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
@@ -483,15 +536,29 @@ def list_vehicles(actor: Staff = Depends(current_staff), db: Session = Depends(g
 @app.post("/api/vehicles", status_code=status.HTTP_201_CREATED)
 def create_vehicle(data: VehicleCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     item = Vehicle(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "vehicle.create", "vehicle", item.id); db.commit(); return item
+@app.put("/api/vehicles/{vehicle_id}")
+def update_vehicle(vehicle_id: int, data: VehicleUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = db.query(Vehicle).filter_by(id=vehicle_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
+    values=data.model_dump(exclude_unset=True)
+    for key, value in values.items(): setattr(item, key, value)
+    audit(db, actor, "vehicle.update", "vehicle", item.id, values); db.commit(); return item
 
 @app.get("/api/routes")
 def list_routes(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     return db.query(BusRoute).filter_by(organization_id=actor.organization_id).order_by(BusRoute.name).all()
 @app.post("/api/routes", status_code=status.HTTP_201_CREATED)
 def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
+    if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first(): raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
     item = BusRoute(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "route.create", "route", item.id); db.commit(); return item
+@app.put("/api/routes/{route_id}")
+def update_route(route_id: int, data: RouteUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    item = db.query(BusRoute).filter_by(id=route_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "便が見つかりません")
+    values=data.model_dump(exclude_unset=True)
+    if values.get("vehicle_id") and not db.query(Vehicle).filter_by(id=values["vehicle_id"], organization_id=actor.organization_id).first(): raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
+    for key, value in values.items(): setattr(item, key, value)
+    audit(db, actor, "route.update", "route", item.id, values); db.commit(); return item
 
 @app.post("/api/trips", status_code=status.HTTP_201_CREATED)
 def create_trip(data: TripCreate, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
