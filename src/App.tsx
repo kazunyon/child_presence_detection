@@ -18,7 +18,7 @@ type SettingChild = { id:number; name:string; class_name:string|null; qr_token:s
 type SettingStaff = { id:number; name:string; role:"admin"|"operator"|"verifier"; is_active:boolean }
 type OrganizationInfo = { id:number; name:string }
 
-const API = (import.meta.env.VITE_API_BASE_URL || '').trim() || 'http://127.0.0.1:8000'
+const API = import.meta.env.DEV ? 'http://127.0.0.1:8000' : (import.meta.env.VITE_API_BASE_URL || '').trim()
 const OFFLINE_KEY = 'mamoru-bus-offline-events'
 const queue = (): OfflineEvent[] => JSON.parse(localStorage.getItem(OFFLINE_KEY) || '[]')
 const saveQueue = (items: OfflineEvent[]) => localStorage.setItem(OFFLINE_KEY, JSON.stringify(items))
