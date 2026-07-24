@@ -85,6 +85,15 @@ class Child(Base):
     qr_token: Mapped[str] = mapped_column(String(100))
 
 
+class RouteChild(Base):
+    """The normal passenger roster for one bus/route."""
+    __tablename__ = "route_children"
+    __table_args__ = (UniqueConstraint("route_id", "child_id", name="uq_route_child"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    route_id: Mapped[int] = mapped_column(ForeignKey("bus_routes.id"), index=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"), index=True)
+
+
 class BusTrip(Base):
     __tablename__ = "bus_trips"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -209,6 +218,10 @@ class RouteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: str = Field(default="往路", max_length=20)
     vehicle_id: int | None = None
+    child_ids: list[int] = Field(default_factory=list)
+class RouteRosterUpdate(BaseModel):
+    child_ids: list[int] = Field(default_factory=list)
+
 class OrganizationUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 class ChildUpdate(BaseModel):
@@ -227,6 +240,7 @@ class RouteUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     direction: str | None = Field(default=None, max_length=20)
     vehicle_id: int | None = None
+    child_ids: list[int] | None = None
 class TripCreate(BaseModel):
     route_id: int | None = None
     vehicle_id: int | None = None
@@ -318,17 +332,34 @@ def trip_for_org(db: Session, trip_id: int, actor: Staff) -> BusTrip:
     return trip
 
 
+def route_children(db: Session, route_id: int) -> list[Child]:
+    return [child for child, in db.query(Child).join(RouteChild, RouteChild.child_id == Child.id).filter(RouteChild.route_id == route_id).order_by(Child.name).all()]
+
+
+def route_public(db: Session, route: BusRoute) -> dict:
+    return {"id": route.id, "name": route.name, "direction": route.direction, "vehicle_id": route.vehicle_id,
+            "children": [{"id": child.id, "name": child.name, "class_name": child.class_name} for child in route_children(db, route.id)]}
+
+
+def replace_route_roster(db: Session, actor: Staff, route: BusRoute, child_ids: list[int]) -> None:
+    wanted = list(dict.fromkeys(child_ids))
+    valid = {child.id for child in db.query(Child).filter(Child.organization_id == actor.organization_id, Child.id.in_(wanted)).all()} if wanted else set()
+    if valid != set(wanted):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "園児が見つかりません")
+    db.query(RouteChild).filter_by(route_id=route.id).delete()
+    db.add_all([RouteChild(route_id=route.id, child_id=child_id) for child_id in wanted])
+
+
 def scan_trip(db: Session, actor: Staff, trip_id: int, qr_token: str, event_type: str) -> dict:
     trip = trip_for_org(db, trip_id, actor)
     if trip.status != "運行中":
-        raise HTTPException(status.HTTP_409_CONFLICT, "この便は完了しています")
+        raise HTTPException(status.HTTP_409_CONFLICT, "この送迎は完了しています")
     child = db.query(Child).filter_by(organization_id=actor.organization_id, qr_token=qr_token).first()
     if not child:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "QRコードが登録されていません")
     attendance = db.query(TripAttendance).filter_by(trip_id=trip.id, child_id=child.id).first()
     if not attendance:
-        attendance = TripAttendance(trip_id=trip.id, child_id=child.id)
-        db.add(attendance)
+        raise HTTPException(status.HTTP_409_CONFLICT, "この園児は通常名簿にいません。当日の園児変更で追加してください")
     now = datetime.now(timezone.utc)
     if event_type == "乗車":
         if attendance.boarded_at:
@@ -381,7 +412,9 @@ def seed(db: Session) -> None:
     ])
     db.flush()
     vehicle = db.query(Vehicle).filter_by(organization_id=org.id).first()
-    db.add(BusRoute(organization_id=org.id, name="ひまわり園 送迎便", direction="帰り", vehicle_id=vehicle.id))
+    route = BusRoute(organization_id=org.id, name="ひまわり園 送迎便", direction="帰り", vehicle_id=vehicle.id)
+    db.add(route); db.flush()
+    db.add_all([RouteChild(route_id=route.id, child_id=child.id) for child in db.query(Child).filter_by(organization_id=org.id).all()])
     db.commit()
 
 
@@ -431,6 +464,12 @@ def migrate_legacy_database() -> None:
             mapped_role = role_map.get(staff.role)
             if mapped_role and staff.role != mapped_role:
                 staff.role = mapped_role; changed = True
+        # Existing installations had no per-bus roster. Initialise each such bus
+        # with the organisation's current children once; later edits are explicit.
+        for route in db.query(BusRoute).all():
+            if not db.query(RouteChild).filter_by(route_id=route.id).first():
+                db.add_all([RouteChild(route_id=route.id, child_id=child.id) for child in db.query(Child).filter_by(organization_id=route.organization_id).all()])
+                changed = True
         if changed:
             db.commit()
 app = FastAPI(title="まもるバス API", version="1.0.0")
@@ -527,7 +566,7 @@ def bootstrap(actor: Staff = Depends(current_staff), db: Session = Depends(get_d
         "children": [{"id": item.id, "name": item.name, "class_name": item.class_name, "qr_token": item.qr_token} for item in children],
         "staff": [{"id": item.id, "name": item.name, "role": item.role, "is_active": item.is_active} for item in staff],
         "vehicles": [{"id": item.id, "name": item.name, "plate_number": item.plate_number} for item in vehicles],
-        "routes": [{"id": item.id, "name": item.name, "direction": item.direction, "vehicle_id": item.vehicle_id} for item in routes],
+        "routes": [route_public(db, item) for item in routes],
     }
 
 def staff_public(item: Staff) -> dict:
@@ -597,25 +636,53 @@ def update_vehicle(vehicle_id: int, data: VehicleUpdate, actor: Staff = Depends(
 
 @app.get("/api/routes")
 def list_routes(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
-    return db.query(BusRoute).filter_by(organization_id=actor.organization_id).order_by(BusRoute.name).all()
+    return [route_public(db, item) for item in db.query(BusRoute).filter_by(organization_id=actor.organization_id).order_by(BusRoute.name).all()]
 @app.post("/api/routes", status_code=status.HTTP_201_CREATED)
 def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first(): raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
-    item = BusRoute(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "route.create", "route", item.id); db.commit(); return item
+    values = data.model_dump(exclude={"child_ids"})
+    item = BusRoute(organization_id=actor.organization_id, **values); db.add(item); db.flush()
+    replace_route_roster(db, actor, item, data.child_ids)
+    audit(db, actor, "route.create", "route", item.id, {"child_ids": data.child_ids}); db.commit(); return route_public(db, item)
 @app.put("/api/routes/{route_id}")
 def update_route(route_id: int, data: RouteUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     item = db.query(BusRoute).filter_by(id=route_id, organization_id=actor.organization_id).first()
-    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "便が見つかりません")
+    if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "バスが見つかりません")
     values=data.model_dump(exclude_unset=True)
     if values.get("vehicle_id") and not db.query(Vehicle).filter_by(id=values["vehicle_id"], organization_id=actor.organization_id).first(): raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
+    child_ids = values.pop("child_ids", None)
     for key, value in values.items(): setattr(item, key, value)
-    audit(db, actor, "route.update", "route", item.id, values); db.commit(); return item
+    if child_ids is not None: replace_route_roster(db, actor, item, child_ids)
+    audit(db, actor, "route.update", "route", item.id, values | ({"child_ids": child_ids} if child_ids is not None else {})); db.commit(); return route_public(db, item)
 
 @app.post("/api/trips", status_code=status.HTTP_201_CREATED)
 def create_trip(data: TripCreate, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
-    if data.route_id and not db.query(BusRoute).filter_by(id=data.route_id, organization_id=actor.organization_id).first(): raise HTTPException(404, "便が見つかりません")
+    route = db.query(BusRoute).filter_by(id=data.route_id, organization_id=actor.organization_id).first() if data.route_id else None
+    if data.route_id and not route: raise HTTPException(404, "バスが見つかりません")
     if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id).first(): raise HTTPException(404, "車両が見つかりません")
-    trip = BusTrip(organization_id=actor.organization_id, **data.model_dump()); db.add(trip); db.flush(); audit(db, actor, "trip.create", "trip", trip.id); db.commit(); db.refresh(trip); return trip
+    trip = BusTrip(organization_id=actor.organization_id, **data.model_dump()); db.add(trip); db.flush()
+    if route:
+        # On the return leg, the usual roster is expected to be on board. A child
+        # who is absent must be removed explicitly via the daily exception screen.
+        expected_boarded_at = trip.started_at if data.direction == "帰り" else None
+        db.add_all([TripAttendance(trip_id=trip.id, child_id=child.id, boarded_at=expected_boarded_at, boarded_by="通常名簿" if expected_boarded_at else None) for child in route_children(db, route.id)])
+    audit(db, actor, "trip.create", "trip", trip.id, {"route_id": data.route_id}); db.commit(); db.refresh(trip); return trip
+
+@app.put("/api/trips/{trip_id}/roster")
+def update_trip_roster(trip_id: int, data: RouteRosterUpdate, actor: Staff = Depends(require_roles("operator", "admin")), db: Session = Depends(get_db)):
+    trip = trip_for_org(db, trip_id, actor)
+    if trip.status != "運行中": raise HTTPException(status.HTTP_409_CONFLICT, "完了した送迎の名簿は変更できません")
+    wanted = list(dict.fromkeys(data.child_ids))
+    valid = {child.id for child in db.query(Child).filter(Child.organization_id == actor.organization_id, Child.id.in_(wanted)).all()} if wanted else set()
+    if valid != set(wanted): raise HTTPException(status.HTTP_404_NOT_FOUND, "園児が見つかりません")
+    current = {row.child_id: row for row in db.query(TripAttendance).filter_by(trip_id=trip.id).all()}
+    changed = set(current) ^ set(wanted)
+    if any(current[child_id].boarded_at or current[child_id].alighted_at for child_id in changed if child_id in current):
+        raise HTTPException(status.HTTP_409_CONFLICT, "確認済みの園児は名簿から外せません")
+    for child_id in set(current) - set(wanted): db.delete(current[child_id])
+    db.add_all([TripAttendance(trip_id=trip.id, child_id=child_id) for child_id in set(wanted) - set(current)])
+    audit(db, actor, "trip.roster.update", "trip", trip.id, {"child_ids": wanted}); db.commit()
+    return trip_summary(db, trip)
 
 @app.get("/api/trips")
 def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, status_filter: str | None = None, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
