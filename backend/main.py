@@ -333,7 +333,7 @@ def trip_for_org(db: Session, trip_id: int, actor: Staff) -> BusTrip:
 
 
 def route_children(db: Session, route_id: int) -> list[Child]:
-    return [child for child, in db.query(Child).join(RouteChild, RouteChild.child_id == Child.id).filter(RouteChild.route_id == route_id).order_by(Child.name).all()]
+    return db.query(Child).join(RouteChild, RouteChild.child_id == Child.id).filter(RouteChild.route_id == route_id).order_by(Child.name).all()
 
 
 def route_public(db: Session, route: BusRoute) -> dict:
