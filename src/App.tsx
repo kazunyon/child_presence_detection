@@ -150,7 +150,35 @@ function Records({operator,auth,onMessage,onResume}:{operator:Operator;auth:Auth
 function TripEvidence({record,onClose}:{record:TripRecord;onClose:()=>void}) { const trip=record.trip; return <section className="card mt-5 overflow-hidden"><div className="p-4 bg-slate-50 flex justify-between gap-3"><div><h2 className="m-0 text-lg font-black">送迎記録の詳細</h2><p className="m-0 mt-1 text-sm text-slate-600">{trip.route_name}・{trip.vehicle_name}</p></div><button className="border-0 bg-transparent text-sm font-bold" onClick={onClose}>閉じる</button></div><div className="p-4 grid grid-cols-2 gap-3 text-sm"><p className="m-0"><b>開始</b><br/>{formatDateTime(trip.started_at)}</p><p className="m-0"><b>完了</b><br/>{formatDateTime(trip.completed_at)}</p><p className="m-0"><b>乗車 / 降車</b><br/>{trip.boarded}人 / {trip.alighted}人</p><p className="m-0"><b>未降車</b><br/><span className={trip.unconfirmed>0?'text-coral font-bold':''}>{trip.unconfirmed}人</span></p></div><div className="border-t p-4"><h3 className="m-0 text-base font-black">乗降履歴</h3>{record.attendance.length===0?<p className="text-sm text-slate-600">乗降記録はありません。</p>:<div className="mt-2 divide-y">{record.attendance.map(item=><div className="py-3 text-sm" key={item.child_id}><b>{item.name}{item.class_name?`（${item.class_name}）`:''}</b><p className="m-0 mt-1 text-slate-600">乗車：{formatDateTime(item.boarded_at)} {item.boarded_by?`（${item.boarded_by}）`:''}</p><p className="m-0 text-slate-600">降車：{formatDateTime(item.alighted_at)} {item.alighted_by?`（${item.alighted_by}）`:''}</p></div>)}</div>}</div><div className="border-t p-4"><h3 className="m-0 text-base font-black">安全確認履歴</h3>{record.safety_checks.length===0?<p className="text-sm text-slate-600">安全確認記録はありません。</p>:<div className="mt-2 divide-y">{record.safety_checks.map(item=><div className="py-3 text-sm" key={item.id}><b>{checkLabel(item.check_type)}</b><p className="m-0 mt-1 text-slate-600">{formatDateTime(item.created_at)} ・ {item.staff_name}</p>{item.latitude&&item.longitude&&<p className="m-0 text-xs text-slate-500">位置情報：{item.latitude}, {item.longitude}</p>}</div>)}</div>}</div></section> }
 function Settings({operator,auth,onMessage,onRefresh}:{operator:Operator;auth:AuthBuilder;onMessage:(message:string)=>void;onRefresh:()=>Promise<void>}) {
   const [organization,setOrganization]=useState<OrganizationInfo|null>(null),[children,setChildren]=useState<SettingChild[]>([]),[staff,setStaff]=useState<SettingStaff[]>([]),[vehicles,setVehicles]=useState<Vehicle[]>([]),[routes,setRoutes]=useState<Route[]>([]),[loading,setLoading]=useState(true)
-  const load=async()=>{ setLoading(true); try { const [o,c,s,v,r]=await Promise.all(['/api/organization','/api/children','/api/staff','/api/vehicles','/api/routes'].map(path=>fetch(`${API}${path}`,auth()))); if(!o.ok||!c.ok||!s.ok||!v.ok||!r.ok) throw new Error('設定を取得する権限がありません'); setOrganization(await o.json());setChildren(await c.json());setStaff(await s.json());setVehicles(await v.json());setRoutes(await r.json()) }catch(error){onMessage(error instanceof Error?error.message:'設定を取得できませんでした')}finally{setLoading(false)} }
+  const getSetting=async<T,>(label:string,path:string):Promise<T>=>{
+    let response:Response|null=null
+    let networkError:unknown=null
+    for(let attempt=0;attempt<3;attempt+=1){
+      try { response=await fetch(`${API}${path}`,auth()); break }
+      catch(error){ networkError=error; if(attempt<2) await new Promise(resolve=>window.setTimeout(resolve,400*(attempt+1))) }
+    }
+    if(!response){
+      const detail=networkError instanceof Error?networkError.message:'通信エラー'
+      throw new Error(`${label}の取得に失敗しました（${path}: ${detail}）`)
+    }
+    if(!response.ok) throw new Error(`${label}の取得に失敗しました（${path}: ${await messageOf(response)}）`)
+    return response.json() as Promise<T>
+  }
+  const load=async()=>{
+    setLoading(true)
+    const errors:string[]=[]
+    const loadOne=async<T,>(label:string,path:string,setter:(value:T)=>void)=>{
+      try { setter(await getSetting<T>(label,path)) }
+      catch(error){ errors.push(error instanceof Error?error.message:`${label}を取得できませんでした`) }
+    }
+    await loadOne<OrganizationInfo>('園情報','/api/organization',setOrganization)
+    await loadOne<SettingChild[]>('園児','/api/children',setChildren)
+    await loadOne<SettingStaff[]>('職員','/api/staff',setStaff)
+    await loadOne<Vehicle[]>('車両','/api/vehicles',setVehicles)
+    await loadOne<Route[]>('便','/api/routes',setRoutes)
+    if(errors.length) onMessage(errors.join(' / '))
+    setLoading(false)
+  }
   useEffect(()=>{if(operator.role==='admin') void load()},[])
   if(operator.role!=='admin') return <section className="card mt-4 p-5"><h1 className="m-0 text-xl font-black">設定</h1><p className="text-sm text-slate-600">園情報・園児・職員・車両・便の変更は管理者だけが行えます。</p></section>
   const post=async(path:string,data:Record<string,unknown>)=>{const response=await fetch(`${API}${path}`,auth({method:'POST',body:JSON.stringify(data)}));if(!response.ok)throw new Error(await messageOf(response));await load();await onRefresh();onMessage('設定を保存しました')}
