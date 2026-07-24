@@ -755,6 +755,22 @@ def complete_trip(trip_id: int, actor: Staff = Depends(require_roles("operator",
     approvals = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="third_party").count()
     if not approvals: raise HTTPException(status.HTTP_409_CONFLICT, "第三者確認が必要です")
     trip.status = "完了"; trip.completed_at = datetime.now(timezone.utc); audit(db, actor, "trip.complete", "trip", trip.id); db.commit(); return {"status": "完了"}
+@app.post("/api/trips/{trip_id}/force-complete")
+def force_complete_trip(trip_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    """Administratively close a stranded trip while preserving an audit trail."""
+    trip = trip_for_org(db, trip_id, actor)
+    if trip.status == "完了":
+        raise HTTPException(status.HTTP_409_CONFLICT, "この送迎はすでに完了しています")
+    summary = trip_summary(db, trip)
+    trip.status = "完了"
+    trip.completed_at = datetime.now(timezone.utc)
+    audit(db, actor, "trip.force_complete", "trip", trip.id, {
+        "unconfirmed": summary["unconfirmed"],
+        "boarded": summary["boarded"],
+        "alighted": summary["alighted"],
+    })
+    db.commit()
+    return {"status": "完了", "forced": True}
 
 @app.post("/api/vehicle-checks", status_code=status.HTTP_201_CREATED)
 def vehicle_check(data: VehicleCheckIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
