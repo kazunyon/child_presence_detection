@@ -410,7 +410,9 @@ def migrate_legacy_database() -> None:
         role_map = {"運転担当": "operator", "第三者確認": "verifier", "管理者": "admin", "職員": "operator"}
         changed = False
         for staff in db.query(Staff).all():
-            if not staff.password_hash and staff.name in pin_by_name:
+            # Shipped test accounts used a legacy SHA-256 value before PBKDF2.
+            # Repair only those named defaults; never overwrite a current PBKDF2 PIN.
+            if staff.name in pin_by_name and (not staff.password_hash or not staff.password_hash.startswith("pbkdf2_sha256$")):
                 staff.password_hash = hash_pin(pin_by_name[staff.name]); changed = True
             if not staff.is_active:
                 staff.is_active = True; changed = True
