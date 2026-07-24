@@ -478,7 +478,7 @@ def migrate_legacy_database() -> None:
         if changed:
             db.commit()
 app = FastAPI(title="まもるバス API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 @app.on_event("startup")
 def setup() -> None:
