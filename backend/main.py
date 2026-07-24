@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, or_, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 raw_database_url = os.getenv("DATABASE_URL", "sqlite:///./mamoru_bus.db")
@@ -333,10 +333,14 @@ def trip_summary(db: Session, trip: BusTrip) -> dict:
 
 
 def seed(db: Session) -> None:
-    if db.query(Organization).count():
+    # The legacy migration can create the first organization before any staff.
+    # Seed only a truly empty staff directory, and reuse that organization.
+    if db.query(Staff).count():
         return
-    org = Organization(name="デモ園")
-    db.add(org); db.flush()
+    org = db.query(Organization).order_by(Organization.id).first()
+    if not org:
+        org = Organization(name="デモ園")
+        db.add(org); db.flush()
     db.add_all([
         Staff(organization_id=org.id, name="田中 先生", role="operator", password_hash=hash_pin("1234")),
         Staff(organization_id=org.id, name="佐藤 先生", role="verifier", password_hash=hash_pin("5678")),
@@ -509,6 +513,34 @@ def trip_scan(trip_id: int, data: TripScanIn, actor: Staff = Depends(current_sta
 @app.get("/api/trips/{trip_id}/status")
 def trip_status(trip_id: int, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     return trip_summary(db, trip_for_org(db, trip_id, actor))
+
+@app.get("/api/trips/{trip_id}/record")
+def trip_record(trip_id: int, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
+    """Return the complete, tenant-scoped evidence for one trip."""
+    trip = trip_for_org(db, trip_id, actor)
+    route = db.query(BusRoute).filter_by(id=trip.route_id, organization_id=actor.organization_id).first() if trip.route_id else None
+    vehicle = db.query(Vehicle).filter_by(id=trip.vehicle_id, organization_id=actor.organization_id).first() if trip.vehicle_id else None
+    attendance = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip.id).order_by(TripAttendance.boarded_at.asc()).all()
+    checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id).order_by(VehicleSafetyCheck.created_at.asc()).all()
+    return {
+        "trip": trip_summary(db, trip) | {
+            "route_name": route.name if route else "便名未設定",
+            "vehicle_name": vehicle.name if vehicle else "車両未設定",
+            "direction": trip.direction,
+            "started_at": trip.started_at,
+            "completed_at": trip.completed_at,
+        },
+        "attendance": [{
+            "child_id": child.id, "name": child.name, "class_name": child.class_name,
+            "boarded_at": item.boarded_at, "boarded_by": item.boarded_by,
+            "alighted_at": item.alighted_at, "alighted_by": item.alighted_by,
+        } for item, child in attendance],
+        "safety_checks": [{
+            "id": item.id, "check_type": item.check_type, "staff_name": item.staff_name,
+            "latitude": item.latitude, "longitude": item.longitude, "created_at": item.created_at,
+        } for item in checks],
+    }
+
 @app.post("/api/trips/{trip_id}/third-party-approval")
 def third_party_approval(trip_id: int, data: ThirdApprovalIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     trip = trip_for_org(db, trip_id, actor)
@@ -598,9 +630,18 @@ async def line_webhook(request: Request, db: Session = Depends(get_db)) -> None:
 def list_line_contacts(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     return db.query(LineContact).filter_by(organization_id=actor.organization_id, is_active=True).order_by(LineContact.created_at.desc()).all()
 @app.get("/api/audit-logs")
-def audit_logs(action: str | None = None, limit: int = 100, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+def audit_logs(action: str | None = None, resource_type: str | None = None, resource_id: str | None = None, query_text: str | None = None, from_at: datetime | None = None, to_at: datetime | None = None, limit: int = 100, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
     query = db.query(AuditLog).filter_by(organization_id=actor.organization_id)
     if action: query = query.filter(AuditLog.action == action)
+    if resource_type: query = query.filter(AuditLog.resource_type == resource_type)
+    if resource_id: query = query.filter(AuditLog.resource_id == resource_id)
+    if from_at: query = query.filter(AuditLog.created_at >= from_at)
+    if to_at: query = query.filter(AuditLog.created_at <= to_at)
+    if query_text:
+        escaped = query_text.strip().replace("%", "\\%").replace("_", "\\_")
+        if escaped:
+            term = f"%{escaped}%"
+            query = query.filter(or_(AuditLog.action.ilike(term), AuditLog.resource_type.ilike(term), AuditLog.resource_id.ilike(term), AuditLog.detail.ilike(term)))
     return query.order_by(AuditLog.created_at.desc()).limit(min(limit, 500)).all()
 
 @app.post("/api/sync")
