@@ -376,6 +376,8 @@ def scan_trip(db: Session, actor: Staff, trip_id: int, qr_token: str, event_type
 
 
 def trip_summary(db: Session, trip: BusTrip) -> dict:
+    route = db.query(BusRoute).filter_by(id=trip.route_id, organization_id=trip.organization_id).first() if trip.route_id else None
+    vehicle = db.query(Vehicle).filter_by(id=trip.vehicle_id, organization_id=trip.organization_id).first() if trip.vehicle_id else None
     rows = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip.id).all()
     children = [{"child_id": c.id, "name": c.name, "boarded_at": a.boarded_at, "alighted_at": a.alighted_at} for a, c in rows]
     boarded = sum(x["boarded_at"] is not None for x in children)
@@ -384,6 +386,9 @@ def trip_summary(db: Session, trip: BusTrip) -> dict:
     return {
         "trip_id": trip.id,
         "status": trip.status,
+        "direction": trip.direction,
+        "route_name": route.name if route else "バス名未設定",
+        "vehicle_name": vehicle.name if vehicle else "号車未設定",
         "boarded": boarded,
         "alighted": alighted,
         "unconfirmed": boarded - alighted,
@@ -690,7 +695,7 @@ def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, s
     if from_at: query = query.filter(BusTrip.started_at >= from_at)
     if to_at: query = query.filter(BusTrip.started_at <= to_at)
     if status_filter: query = query.filter(BusTrip.status == status_filter)
-    return [trip_summary(db, trip) | {"started_at": trip.started_at, "completed_at": trip.completed_at, "direction": trip.direction} for trip in query.order_by(BusTrip.started_at.desc()).limit(200)]
+    return [trip_summary(db, trip) | {"started_at": trip.started_at, "completed_at": trip.completed_at} for trip in query.order_by(BusTrip.started_at.desc()).limit(200)]
 
 @app.post("/api/trips/{trip_id}/scans")
 def trip_scan(trip_id: int, data: TripScanIn, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
