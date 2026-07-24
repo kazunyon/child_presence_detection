@@ -29,6 +29,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-me")
 JWT_ALGORITHM = "HS256"
 TOKEN_MINUTES = int(os.getenv("TOKEN_EXPIRE_MINUTES", "480"))
+JST = timezone(timedelta(hours=9), name="JST")
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
@@ -549,14 +550,19 @@ def me(actor: Staff = Depends(current_staff)) -> dict:
 @app.get("/api/dashboard")
 def dashboard(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
     organization = db.get(Organization, actor.organization_id)
-    now = datetime.now(timezone.utc)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
-    trips = db.query(BusTrip).filter(BusTrip.organization_id == actor.organization_id, BusTrip.started_at >= day_start, BusTrip.started_at < day_end).order_by(BusTrip.started_at.desc()).all()
+    now_jst = datetime.now(JST)
+    day_start_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_jst = day_start_jst + timedelta(days=1)
+    # Datetimes are stored as UTC in the database.  Convert the JST calendar-day
+    # boundaries to naive UTC because the existing DateTime columns are timezone
+    # neutral in both SQLite and PostgreSQL.
+    day_start_utc = day_start_jst.astimezone(timezone.utc).replace(tzinfo=None)
+    day_end_utc = day_end_jst.astimezone(timezone.utc).replace(tzinfo=None)
+    trips = db.query(BusTrip).filter(BusTrip.organization_id == actor.organization_id, BusTrip.started_at >= day_start_utc, BusTrip.started_at < day_end_utc).order_by(BusTrip.started_at.desc()).all()
     summaries = [trip_summary(db, trip) for trip in trips]
     return {
         "organization_name": organization.name if organization else "園",
-        "date": day_start.date().isoformat(),
+        "date": day_start_jst.date().isoformat(),
         "today_trip_count": len(trips),
         "active_trip_count": sum(1 for trip in trips if trip.status == "運行中"),
         "completed_trip_count": sum(1 for trip in trips if trip.status == "完了"),
