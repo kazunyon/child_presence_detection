@@ -552,7 +552,12 @@ def dashboard(actor: Staff = Depends(current_staff), db: Session = Depends(get_d
     now = datetime.now(timezone.utc)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
-    trips = db.query(BusTrip).filter(BusTrip.organization_id == actor.organization_id, BusTrip.started_at >= day_start, BusTrip.started_at < day_end).order_by(BusTrip.started_at.desc()).all()
+    trips = db.query(BusTrip).filter(
+        BusTrip.organization_id == actor.organization_id,
+        BusTrip.started_at >= day_start,
+        BusTrip.started_at < day_end,
+        BusTrip.status != "中止",
+    ).order_by(BusTrip.started_at.desc()).all()
     summaries = [trip_summary(db, trip) for trip in trips]
     return {
         "organization_name": organization.name if organization else "園",
@@ -697,7 +702,10 @@ def update_trip_roster(trip_id: int, data: RouteRosterUpdate, actor: Staff = Dep
 
 @app.get("/api/trips")
 def list_trips(from_at: datetime | None = None, to_at: datetime | None = None, status_filter: str | None = None, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
-    query = db.query(BusTrip).filter_by(organization_id=actor.organization_id)
+    query = db.query(BusTrip).filter(
+        BusTrip.organization_id == actor.organization_id,
+        BusTrip.status != "中止",
+    )
     if from_at: query = query.filter(BusTrip.started_at >= from_at)
     if to_at: query = query.filter(BusTrip.started_at <= to_at)
     if status_filter: query = query.filter(BusTrip.status == status_filter)
