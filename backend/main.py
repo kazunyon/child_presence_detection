@@ -250,7 +250,8 @@ class ThirdApprovalIn(BaseModel):
     pin: str = Field(min_length=4, max_length=128)
 
 class AdminPinRecoveryIn(BaseModel):
-    staff_id: int = 3
+    # Emergency recovery is deliberately limited to the documented admin account.
+    staff_id: Literal[3] = 3
     new_pin: str = Field(min_length=8, max_length=128)
 
 class SyncItem(BaseModel):
@@ -467,9 +468,18 @@ def reset_admin_pin(data: AdminPinRecoveryIn, x_admin_recovery_token: str | None
     if db.get(AdminPinRecovery, token_hash):
         raise HTTPException(status.HTTP_409_CONFLICT, "この復旧トークンは使用済みです。Renderから削除してください")
     staff = db.get(Staff, data.staff_id)
-    if not staff or staff.role != "admin":
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "管理者アカウントが見つかりません")
-    staff.password_hash, staff.is_active = hash_pin(data.new_pin), True
+    if not staff:
+        # Older production databases can contain the two operating accounts
+        # but lack the originally documented ID 3 administrator. A valid
+        # one-time recovery token authorizes restoring only that fixed account.
+        organization = db.query(Organization).order_by(Organization.id).first()
+        if not organization:
+            raise HTTPException(status.HTTP_409_CONFLICT, "復旧先の園情報が見つかりません")
+        staff = Staff(id=3, organization_id=organization.id, name="管理者", role="admin", password_hash=hash_pin(data.new_pin), is_active=True)
+        db.add(staff)
+    else:
+        staff.role = "admin"
+        staff.password_hash, staff.is_active = hash_pin(data.new_pin), True
     db.add(AdminPinRecovery(token_hash=token_hash, staff_id=staff.id))
     audit(db, staff, "auth.admin_pin_recovery", "staff", staff.id, {"method": "one_time_recovery_token"})
     db.commit()
