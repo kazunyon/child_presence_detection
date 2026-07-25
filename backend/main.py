@@ -550,17 +550,6 @@ def me(actor: Staff = Depends(current_staff)) -> dict:
 @app.get("/api/dashboard")
 def dashboard(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)) -> dict:
     organization = db.get(Organization, actor.organization_id)
-<<<<<<< HEAD
-    now = datetime.now(timezone.utc)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
-    trips = db.query(BusTrip).filter(
-        BusTrip.organization_id == actor.organization_id,
-        BusTrip.started_at >= day_start,
-        BusTrip.started_at < day_end,
-        BusTrip.status != "中止",
-    ).order_by(BusTrip.started_at.desc()).all()
-=======
     now_jst = datetime.now(JST)
     day_start_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end_jst = day_start_jst + timedelta(days=1)
@@ -569,8 +558,12 @@ def dashboard(actor: Staff = Depends(current_staff), db: Session = Depends(get_d
     # neutral in both SQLite and PostgreSQL.
     day_start_utc = day_start_jst.astimezone(timezone.utc).replace(tzinfo=None)
     day_end_utc = day_end_jst.astimezone(timezone.utc).replace(tzinfo=None)
-    trips = db.query(BusTrip).filter(BusTrip.organization_id == actor.organization_id, BusTrip.started_at >= day_start_utc, BusTrip.started_at < day_end_utc).order_by(BusTrip.started_at.desc()).all()
->>>>>>> 1f7dc33b2fa0a06d5f202abd8bcd73852cfdb260
+    trips = db.query(BusTrip).filter(
+        BusTrip.organization_id == actor.organization_id,
+        BusTrip.started_at >= day_start_utc,
+        BusTrip.started_at < day_end_utc,
+        BusTrip.status != "中止",
+    ).order_by(BusTrip.started_at.desc()).all()
     summaries = [trip_summary(db, trip) for trip in trips]
     return {
         "organization_name": organization.name if organization else "園",
