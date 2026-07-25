@@ -3,3 +3,232 @@
 * { box-sizing: border-box; } body { margin:0; font-family: ui-rounded, "Hiragino Maru Gothic ProN", "Yu Gothic", sans-serif; color:#17324d; background:#f2f7f7; } button { font:inherit; } .app { max-width: 500px; min-height:100vh; margin:auto; background:#fff; box-shadow:0 0 40px #d6e3e3; } .card { border:1px solid #e2eeee; border-radius:20px; background:#fff; box-shadow:0 4px 16px rgba(25, 75, 80,.05); } .nav { position:sticky; bottom:0; background:#fff; border-top:1px solid #e5eeee; display:flex; justify-content:space-around; padding:9px 4px 13px; } .nav button { border:0; background:transparent; color:#6b7f8c; font-size:11px; display:grid; gap:2px; justify-items:center; min-width:72px; } .nav .active { color:#0d9488; font-weight:800; } .big-action { border:0; border-radius:18px; padding:19px; width:100%; color:#fff; font-weight:800; font-size:18px; background:#0d9488; box-shadow:0 7px 0 #08776e; cursor:pointer; } .big-action:active { transform:translateY(3px); box-shadow:0 4px 0 #08776e; } .badge { border-radius:999px; padding:5px 10px; font-size:12px; font-weight:800; display:inline-block; } .check { width:25px; height:25px; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:15px; font-weight:bold; flex:none; } .step-line { width:2px; height:22px; background:#c7e5df; margin-left:11px; } .scan { width:220px; height:220px; border-radius:24px; border:5px solid #0d9488; margin:34px auto; background:repeating-linear-gradient(0deg,#fff,#fff 11px,#f0fbf9 12px), repeating-linear-gradient(90deg,transparent,transparent 11px,#e2f5f1 12px); display:grid; place-items:center; font-size:54px; } .modal { position:fixed; inset:0; background:#17324d99; display:grid; place-items:end center; z-index:3; } .sheet { width:min(500px,100%); background:white; border-radius:28px 28px 0 0; padding:26px 22px 36px; }
 
 .route-choice { width:100%; display:flex; align-items:center; gap:12px; padding:16px 0; border:0; border-top:1px solid #e2eeee; background:#fff; color:#17324d; text-align:left; cursor:pointer; } .route-choice:first-of-type { margin-top:8px; } .route-choice > span:nth-child(2) { display:grid; gap:3px; flex:1; } .route-choice small { color:#617787; font-size:12px; } .route-icon { width:40px; height:40px; border-radius:12px; background:#dff7ee; display:grid; place-items:center; } .route-arrow { color:#0d9488; font-size:28px; line-height:1; }
+
+.login-app {
+  max-width: 560px;
+  box-shadow: none;
+  color: #143b31;
+  font-family: system-ui, "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+}
+.login-header {
+  min-height: 108px;
+  padding: 27px 40px 22px;
+  background: #fff;
+  border-bottom: 1px solid #d8e0dd;
+  display: flex;
+  align-items: flex-start;
+}
+.login-eyebrow {
+  color: #176b5a;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.login-header strong {
+  display: block;
+  margin-top: 2px;
+  color: #143b31;
+  font-size: 25px;
+  line-height: 1.25;
+  letter-spacing: .03em;
+}
+.login-main {
+  padding: 42px 52px 48px;
+}
+.login-screen {
+  margin: 0;
+}
+.login-intro h1 {
+  margin: 0;
+  text-align: center;
+  color: #143b31;
+  font-size: 27px;
+  font-weight: 650;
+  line-height: 1.45;
+  letter-spacing: .09em;
+}
+.login-steps {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 28px 0 40px;
+  padding: 0;
+  list-style: none;
+}
+.login-steps::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 16.66%;
+  right: 16.66%;
+  border-top: 1px solid #bdcac6;
+}
+.login-steps li {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  color: #71827d;
+  font-size: 15px;
+  line-height: 1.3;
+  letter-spacing: .05em;
+}
+.step-marker {
+  position: relative;
+  z-index: 1;
+  width: 21px;
+  height: 21px;
+  border: 1.5px solid #9aaba6;
+  border-radius: 50%;
+  background: #fff;
+}
+.login-steps .is-current {
+  color: #176b5a;
+  font-weight: 700;
+}
+.login-steps .is-current .step-marker {
+  border-color: #188b74;
+  box-shadow: inset 0 0 0 5px #fff;
+  background: #188b74;
+}
+.login-form {
+  display: grid;
+}
+.login-form label,
+.recovery-panel label {
+  margin-bottom: 8px;
+  color: #143b31;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: .03em;
+}
+.login-form input,
+.recovery-panel input {
+  width: 100%;
+  min-height: 58px;
+  padding: 13px 16px;
+  border: 1px solid #8fa19b;
+  border-radius: 12px;
+  background: #fff;
+  color: #143b31;
+  font: inherit;
+  font-size: 18px;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.login-form input:focus,
+.recovery-panel input:focus {
+  border-color: #176b5a;
+  box-shadow: 0 0 0 3px rgba(23, 107, 90, .14);
+}
+.login-form label:not(:first-child) {
+  margin-top: 22px;
+}
+.login-submit {
+  min-height: 80px;
+  margin-top: 26px;
+  border: 0;
+  border-radius: 13px;
+  background: #176b5a;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: .06em;
+  cursor: pointer;
+  transition: background .15s ease, transform .15s ease;
+}
+.login-submit:hover {
+  background: #125849;
+}
+.login-submit:active {
+  transform: translateY(1px);
+}
+.login-submit:focus-visible,
+.recovery-toggle:focus-visible,
+.recovery-panel button:focus-visible {
+  outline: 3px solid rgba(23, 107, 90, .25);
+  outline-offset: 3px;
+}
+.recovery-toggle {
+  margin-top: 30px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  background: transparent;
+  color: #325f54;
+  font-size: 14px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+.recovery-panel {
+  display: grid;
+  margin-top: 22px;
+  padding: 20px;
+  border: 1px solid #d8e0dd;
+  border-radius: 14px;
+  background: #f5f8f6;
+}
+.recovery-panel h2 {
+  margin: 0;
+  font-size: 17px;
+}
+.recovery-panel p {
+  margin: 8px 0 18px;
+  color: #526963;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.recovery-panel label:not(:first-of-type) {
+  margin-top: 16px;
+}
+.recovery-panel button {
+  min-height: 48px;
+  margin-top: 18px;
+  border: 0;
+  border-radius: 11px;
+  background: #143b31;
+  color: #fff;
+  font-weight: 700;
+}
+.recovery-panel button:disabled {
+  cursor: not-allowed;
+  opacity: .42;
+}
+.login-notice,
+.login-error {
+  margin: 18px 0 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.login-notice {
+  background: #edf6f2;
+  color: #176b5a;
+}
+.login-error {
+  background: #fff1f0;
+  color: #a43a32;
+}
+
+@media (max-width: 560px) {
+  body {
+    background: #fff;
+  }
+  .login-header {
+    min-height: 96px;
+    padding: 23px 24px 18px;
+  }
+  .login-main {
+    padding: 34px 24px 48px;
+  }
+  .login-intro h1 {
+    font-size: 24px;
+  }
+  .login-steps {
+    margin: 26px 0 34px;
+  }
+  .login-steps li {
+    font-size: 14px;
+  }
+}
