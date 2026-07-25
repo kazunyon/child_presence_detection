@@ -7,6 +7,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.main import (
+    AuditLog,
+    BusRoute,
+    Vehicle,
+    VehicleCreate,
+    create_vehicle,
+    delete_vehicle,
+    list_vehicles,
+    trip_summary,
     Base,
     BusTrip,
     Child,
@@ -137,6 +145,80 @@ class CancelledTripVisibilityTest(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 409)
         self.assertEqual(self.active_trip.status, "運行中")
+
+
+class VehicleDeletionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        self.db = sessionmaker(bind=engine)()
+
+        organization = Organization(name="テスト園")
+        self.db.add(organization)
+        self.db.flush()
+        self.actor = Staff(
+            organization_id=organization.id,
+            name="管理者",
+            role="admin",
+            password_hash=hash_pin("test-pin"),
+        )
+        self.vehicle = Vehicle(
+            organization_id=organization.id,
+            name="1号車",
+            plate_number="品川 500 い 2222",
+        )
+        self.db.add_all([self.actor, self.vehicle])
+        self.db.flush()
+        self.route = BusRoute(
+            organization_id=organization.id,
+            name="1号車・往路",
+            direction="往路",
+            vehicle_id=self.vehicle.id,
+        )
+        self.trip = BusTrip(
+            organization_id=organization.id,
+            route_id=None,
+            vehicle_id=self.vehicle.id,
+            direction="往路",
+            status="完了",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        )
+        self.db.add_all([self.route, self.trip])
+        self.db.commit()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_delete_hides_vehicle_detaches_route_and_preserves_trip_history(self) -> None:
+        result = delete_vehicle(self.vehicle.id, actor=self.actor, db=self.db)
+
+        self.assertEqual(result, {"status": "deleted", "detached_route_count": 1})
+        self.assertFalse(self.vehicle.is_active)
+        self.assertIsNone(self.route.vehicle_id)
+        self.assertEqual(self.trip.vehicle_id, self.vehicle.id)
+        self.assertEqual(list_vehicles(actor=self.actor, db=self.db), [])
+        self.assertEqual(trip_summary(self.db, self.trip)["vehicle_name"], "1号車")
+        audit_log = self.db.query(AuditLog).filter_by(action="vehicle.delete").one()
+        self.assertEqual(audit_log.resource_id, str(self.vehicle.id))
+
+    def test_registering_same_name_restores_deleted_vehicle(self) -> None:
+        delete_vehicle(self.vehicle.id, actor=self.actor, db=self.db)
+
+        restored = create_vehicle(
+            VehicleCreate(name="1号車", plate_number="品川 500 い 3333"),
+            actor=self.actor,
+            db=self.db,
+        )
+
+        self.assertEqual(restored.id, self.vehicle.id)
+        self.assertTrue(restored.is_active)
+        self.assertEqual(restored.plate_number, "品川 500 い 3333")
+        self.assertEqual(
+            [item.id for item in list_vehicles(actor=self.actor, db=self.db)],
+            [self.vehicle.id],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
