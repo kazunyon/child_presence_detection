@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import jsQR from 'jsqr'
 
 type View = 'home' | 'operation' | 'children' | 'records' | 'settings'
 type Mode = '乗車' | '降車'
@@ -90,7 +91,7 @@ export default function App() {
   }
   const scanChild = async (qr:string) => {
     if (!trip) return
-    try { const r = await fetch(`${API}/api/trips/${trip.trip_id}/scans`,auth({method:'POST',body:JSON.stringify({qr_token:qr,event_type:mode})})); if (!r.ok) throw new Error(await messageOf(r)); await refresh(trip.trip_id); setScanner(null); setMessage(`${mode}を記録しました`) }
+    try { const r = await fetch(`${API}/api/trips/${trip.trip_id}/scans`,auth({method:'POST',body:JSON.stringify({qr_token:qr.trim(),event_type:mode})})); if (!r.ok) throw new Error(await messageOf(r)); await refresh(trip.trip_id); setScanner(null); setMessage(`${mode}を記録しました`) }
     catch (error) {
       setScanner(null)
       if (!navigator.onLine) { const items=[...queue(),{client_event_id:crypto.randomUUID(),trip_id:trip.trip_id,qr_token:qr,event_type:mode}]; saveQueue(items); setOfflineCount(items.length); setMessage('オフラインのため、記録をこの端末に保留しました') }
@@ -291,4 +292,22 @@ function TripRosterEditor({children,selectedIds,onSave}:{children:RosterChild[];
 function ComingSoon({view}:{view:View}) { const title=view==='records'?'記録':'設定'; return <section className="card mt-4 p-5"><h1 className="m-0 text-xl font-black">{title}</h1><p className="text-sm text-slate-600">この画面は次の段階で実記録と園設定に接続します。</p></section> }
 function Nav({active,onChange}:{active:View;onChange:(v:View)=>void}) { return <nav className="nav"><button className={active==='home'?'active':''} onClick={()=>onChange('home')}>⌂<span>ホーム</span></button><button className={active==='operation'?'active':''} onClick={()=>onChange('operation')}>🚌<span>運行</span></button><button className={active==='children'?'active':''} onClick={()=>onChange('children')}>👧<span>園児</span></button><button className={active==='records'?'active':''} onClick={()=>onChange('records')}>▤<span>記録</span></button><button className={active==='settings'?'active':''} onClick={()=>onChange('settings')}>⚙<span>設定</span></button></nav> }
 type Detector={detect:(s:ImageBitmapSource)=>Promise<Array<{rawValue:string}>>}; declare global { interface Window { BarcodeDetector?:new(o:{formats:string[]})=>Detector } }
-function Scanner({title,onRead,onClose}:{title:string;onRead:(v:string)=>void;onClose:()=>void}) { const video=useRef<HTMLVideoElement>(null),[manual,setManual]=useState(''),[cameraError,setCameraError]=useState(''); useEffect(()=>{let stream:MediaStream|undefined;let timer=0;(async()=>{try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});if(video.current)video.current.srcObject=stream;if(window.BarcodeDetector){const detector=new window.BarcodeDetector({formats:['qr_code']});timer=window.setInterval(async()=>{if(video.current){const found=await detector.detect(video.current);if(found[0])onRead(found[0].rawValue)}},700)}}catch{setCameraError('カメラを利用できません。権限を許可するか、QR文字列を入力してください。')}})();return()=>{clearInterval(timer);stream?.getTracks().forEach(track=>track.stop())}},[onRead]);return <div className="modal"><div className="sheet"><h2 className="text-center text-xl font-black">{title}</h2><video ref={video} autoPlay playsInline muted className="w-full aspect-square bg-slate-900 rounded-2xl"/>{cameraError&&<p className="text-sm text-red-700">{cameraError}</p>}<div className="flex gap-2 mt-3"><input className="flex-1 border rounded-xl p-3" value={manual} onChange={e=>setManual(e.target.value)} placeholder="QR文字列"/><button className="bg-teal text-white rounded-xl px-3" onClick={()=>manual&&onRead(manual)}>送信</button></div><button className="w-full p-3 border-0 bg-white" onClick={onClose}>キャンセル</button></div></div> }
+function Scanner({title,onRead,onClose}:{title:string;onRead:(v:string)=>void;onClose:()=>void}) {
+  const video=useRef<HTMLVideoElement>(null),canvas=useRef<HTMLCanvasElement>(null),[manual,setManual]=useState(''),[cameraError,setCameraError]=useState('')
+  useEffect(()=>{
+    let stream:MediaStream|undefined,timer=0,done=false
+    const submit=(value:string)=>{const normalized=value.trim();if(done||!normalized)return;done=true;onRead(normalized)}
+    ;(async()=>{try{
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}})
+      if(video.current)video.current.srcObject=stream
+      if(window.BarcodeDetector){
+        const detector=new window.BarcodeDetector({formats:['qr_code']})
+        timer=window.setInterval(async()=>{if(video.current&&video.current.readyState>=2){const found=await detector.detect(video.current);if(found[0])submit(found[0].rawValue)}},700)
+      } else {
+        timer=window.setInterval(()=>{const v=video.current,c=canvas.current;if(!v||!c||v.readyState<2)return;const width=v.videoWidth,height=v.videoHeight;if(!width||!height)return;c.width=width;c.height=height;const context=c.getContext('2d',{willReadFrequently:true});if(!context)return;context.drawImage(v,0,0,width,height);const image=context.getImageData(0,0,width,height);const code=jsQR(image.data,width,height);if(code?.data)submit(code.data)},450)
+      }
+    }catch{setCameraError('カメラを利用できません。権限を許可するか、QR文字列を入力してください。')}})()
+    return()=>{done=true;clearInterval(timer);stream?.getTracks().forEach(track=>track.stop())}
+  },[onRead])
+  return <div className="modal"><div className="sheet"><h2 className="text-center text-xl font-black">{title}</h2><video ref={video} autoPlay playsInline muted className="w-full aspect-square bg-slate-900 rounded-2xl"/><canvas ref={canvas} className="hidden"/>{cameraError&&<p className="text-sm text-red-700">{cameraError}</p>}<div className="flex gap-2 mt-3"><input className="flex-1 border rounded-xl p-3" value={manual} onChange={e=>setManual(e.target.value)} placeholder="QR文字列"/><button className="bg-teal text-white rounded-xl px-3" onClick={()=>manual.trim()&&onRead(manual.trim())}>送信</button></div><button className="w-full p-3 border-0 bg-white" onClick={onClose}>キャンセル</button></div></div>
+}
