@@ -1,6 +1,8 @@
 import unittest
 from datetime import datetime, timezone
 
+from fastapi import HTTPException
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -11,6 +13,7 @@ from backend.main import (
     Organization,
     Staff,
     TripAttendance,
+    cancel_unstarted_trip,
     dashboard,
     hash_pin,
     list_trips,
@@ -72,6 +75,7 @@ class CancelledTripVisibilityTest(unittest.TestCase):
                 trip_id=self.active_trip.id,
                 child_id=child.id,
                 boarded_at=started_at,
+                boarded_by="通常名簿",
             ),
             TripAttendance(
                 trip_id=self.cancelled_trip.id,
@@ -104,6 +108,35 @@ class CancelledTripVisibilityTest(unittest.TestCase):
             {self.active_trip.id, self.completed_trip.id},
         )
 
+
+    def test_return_trip_with_normal_roster_boarding_can_be_cancelled(self) -> None:
+        result = cancel_unstarted_trip(
+            self.active_trip.id,
+            actor=self.actor,
+            db=self.db,
+        )
+
+        self.assertEqual(result, {"status": "中止"})
+        self.assertEqual(self.active_trip.status, "中止")
+        self.assertIsNotNone(self.active_trip.completed_at)
+
+    def test_trip_with_actual_alighting_cannot_be_cancelled(self) -> None:
+        attendance = self.db.query(TripAttendance).filter_by(
+            trip_id=self.active_trip.id,
+        ).one()
+        attendance.alighted_at = datetime.now(timezone.utc)
+        attendance.alighted_by = self.actor.name
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as context:
+            cancel_unstarted_trip(
+                self.active_trip.id,
+                actor=self.actor,
+                db=self.db,
+            )
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(self.active_trip.status, "運行中")
 
 if __name__ == "__main__":
     unittest.main()
