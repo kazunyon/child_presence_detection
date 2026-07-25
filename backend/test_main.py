@@ -9,9 +9,13 @@ from sqlalchemy.orm import sessionmaker
 from backend.main import (
     AuditLog,
     BusRoute,
+    RouteChild,
     Vehicle,
+    TripCreate,
     VehicleCreate,
+    create_trip,
     create_vehicle,
+    delete_route,
     delete_vehicle,
     list_vehicles,
     trip_summary,
@@ -24,6 +28,7 @@ from backend.main import (
     cancel_unstarted_trip,
     dashboard,
     hash_pin,
+    list_routes,
     list_trips,
 )
 
@@ -147,6 +152,80 @@ class CancelledTripVisibilityTest(unittest.TestCase):
         self.assertEqual(self.active_trip.status, "運行中")
 
 
+
+class RouteDeletionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        self.db = sessionmaker(bind=engine)()
+
+        organization = Organization(name="テスト園")
+        self.db.add(organization)
+        self.db.flush()
+        self.actor = Staff(
+            organization_id=organization.id,
+            name="管理者",
+            role="admin",
+            password_hash=hash_pin("test-pin"),
+        )
+        self.child = Child(
+            organization_id=organization.id,
+            name="園児",
+            qr_token="test-child",
+        )
+        self.vehicle = Vehicle(
+            organization_id=organization.id,
+            name="1号車",
+            plate_number="品川 500 い 2222",
+        )
+        self.db.add_all([self.actor, self.child, self.vehicle])
+        self.db.flush()
+        self.route = BusRoute(
+            organization_id=organization.id,
+            name="1号車・往路",
+            direction="往路",
+            vehicle_id=self.vehicle.id,
+        )
+        self.db.add(self.route)
+        self.db.flush()
+        self.db.add(RouteChild(route_id=self.route.id, child_id=self.child.id))
+        self.trip = BusTrip(
+            organization_id=organization.id,
+            route_id=self.route.id,
+            vehicle_id=self.vehicle.id,
+            direction="往路",
+            status="完了",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        )
+        self.db.add(self.trip)
+        self.db.commit()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_delete_hides_route_removes_roster_and_preserves_trip_history(self) -> None:
+        result = delete_route(self.route.id, actor=self.actor, db=self.db)
+
+        self.assertEqual(result, {"status": "deleted", "removed_roster_count": 1})
+        self.assertFalse(self.route.is_active)
+        self.assertEqual(list_routes(actor=self.actor, db=self.db), [])
+        self.assertEqual(trip_summary(self.db, self.trip)["route_name"], "1号車・往路")
+        self.assertEqual(self.db.query(RouteChild).filter_by(route_id=self.route.id).count(), 0)
+        audit_log = self.db.query(AuditLog).filter_by(action="route.delete").one()
+        self.assertEqual(audit_log.resource_id, str(self.route.id))
+
+    def test_deleted_route_cannot_be_started(self) -> None:
+        delete_route(self.route.id, actor=self.actor, db=self.db)
+
+        with self.assertRaises(HTTPException) as context:
+            create_trip(
+                TripCreate(route_id=self.route.id, vehicle_id=self.vehicle.id, direction="往路"),
+                actor=self.actor,
+                db=self.db,
+            )
+
+        self.assertEqual(context.exception.status_code, 404)
 class VehicleDeletionTest(unittest.TestCase):
     def setUp(self) -> None:
         engine = create_engine("sqlite:///:memory:")

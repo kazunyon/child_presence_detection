@@ -75,6 +75,7 @@ class BusRoute(Base):
     name: Mapped[str] = mapped_column(String(100))
     direction: Mapped[str] = mapped_column(String(20), default="往路")
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Child(Base):
@@ -433,7 +434,7 @@ def migrate_legacy_database() -> None:
     legacy_columns = {
         "staff": {"organization_id": "INTEGER", "password_hash": "VARCHAR(256)", "is_active": "BOOLEAN DEFAULT TRUE"},
         "vehicles": {"organization_id": "INTEGER", "is_active": "BOOLEAN DEFAULT TRUE"},
-        "bus_routes": {"organization_id": "INTEGER"},
+        "bus_routes": {"organization_id": "INTEGER", "is_active": "BOOLEAN DEFAULT TRUE"},
         "children": {"organization_id": "INTEGER"},
         "bus_trips": {"organization_id": "INTEGER"},
         "vehicle_safety_checks": {"organization_id": "INTEGER", "trip_id": "INTEGER"},
@@ -581,7 +582,7 @@ def bootstrap(actor: Staff = Depends(current_staff), db: Session = Depends(get_d
     children = db.query(Child).filter_by(organization_id=oid).order_by(Child.name).all()
     staff = db.query(Staff).filter_by(organization_id=oid).order_by(Staff.name).all()
     vehicles = db.query(Vehicle).filter_by(organization_id=oid, is_active=True).order_by(Vehicle.name).all()
-    routes = db.query(BusRoute).filter_by(organization_id=oid).order_by(BusRoute.name).all()
+    routes = db.query(BusRoute).filter_by(organization_id=oid, is_active=True).order_by(BusRoute.name).all()
     return {
         "children": [{"id": item.id, "name": item.name, "class_name": item.class_name, "qr_token": item.qr_token} for item in children],
         "staff": [{"id": item.id, "name": item.name, "role": item.role, "is_active": item.is_active} for item in staff],
@@ -692,7 +693,7 @@ def delete_vehicle(vehicle_id: int, actor: Staff = Depends(require_roles("admin"
 @app.get("/api/bus-routes")
 @app.get("/api/routes")
 def list_routes(actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
-    return [route_public(db, item) for item in db.query(BusRoute).filter_by(organization_id=actor.organization_id).order_by(BusRoute.name).all()]
+    return [route_public(db, item) for item in db.query(BusRoute).filter_by(organization_id=actor.organization_id, is_active=True).order_by(BusRoute.name).all()]
 @app.post("/api/bus-routes", status_code=status.HTTP_201_CREATED)
 @app.post("/api/routes", status_code=status.HTTP_201_CREATED)
 def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
@@ -704,7 +705,7 @@ def create_route(data: RouteCreate, actor: Staff = Depends(require_roles("admin"
 @app.put("/api/bus-routes/{route_id}")
 @app.put("/api/routes/{route_id}")
 def update_route(route_id: int, data: RouteUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    item = db.query(BusRoute).filter_by(id=route_id, organization_id=actor.organization_id).first()
+    item = db.query(BusRoute).filter_by(id=route_id, organization_id=actor.organization_id, is_active=True).first()
     if not item: raise HTTPException(status.HTTP_404_NOT_FOUND, "バスが見つかりません")
     values=data.model_dump(exclude_unset=True)
     if values.get("vehicle_id") and not db.query(Vehicle).filter_by(id=values["vehicle_id"], organization_id=actor.organization_id, is_active=True).first(): raise HTTPException(status.HTTP_404_NOT_FOUND, "車両が見つかりません")
@@ -712,10 +713,30 @@ def update_route(route_id: int, data: RouteUpdate, actor: Staff = Depends(requir
     for key, value in values.items(): setattr(item, key, value)
     if child_ids is not None: replace_route_roster(db, actor, item, child_ids)
     audit(db, actor, "route.update", "route", item.id, values | ({"child_ids": child_ids} if child_ids is not None else {})); db.commit(); return route_public(db, item)
+@app.delete("/api/bus-routes/{route_id}")
+@app.delete("/api/routes/{route_id}")
+def delete_route(route_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
+    """Hide a route from master data while preserving historical trip evidence."""
+    item = db.query(BusRoute).filter_by(
+        id=route_id,
+        organization_id=actor.organization_id,
+        is_active=True,
+    ).first()
+    if not item:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "便が見つかりません")
+    roster_count = db.query(RouteChild).filter_by(route_id=item.id).delete()
+    item.is_active = False
+    audit(db, actor, "route.delete", "route", item.id, {
+        "name": item.name,
+        "direction": item.direction,
+        "removed_roster_count": roster_count,
+    })
+    db.commit()
+    return {"status": "deleted", "removed_roster_count": roster_count}
 
 @app.post("/api/trips", status_code=status.HTTP_201_CREATED)
 def create_trip(data: TripCreate, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
-    route = db.query(BusRoute).filter_by(id=data.route_id, organization_id=actor.organization_id).first() if data.route_id else None
+    route = db.query(BusRoute).filter_by(id=data.route_id, organization_id=actor.organization_id, is_active=True).first() if data.route_id else None
     if data.route_id and not route: raise HTTPException(404, "バスが見つかりません")
     if data.vehicle_id and not db.query(Vehicle).filter_by(id=data.vehicle_id, organization_id=actor.organization_id, is_active=True).first(): raise HTTPException(404, "車両が見つかりません")
     trip = BusTrip(organization_id=actor.organization_id, **data.model_dump()); db.add(trip); db.flush()
