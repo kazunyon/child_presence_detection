@@ -293,21 +293,18 @@ function ComingSoon({view}:{view:View}) { const title=view==='records'?'記録':
 function Nav({active,onChange}:{active:View;onChange:(v:View)=>void}) { return <nav className="nav"><button className={active==='home'?'active':''} onClick={()=>onChange('home')}>⌂<span>ホーム</span></button><button className={active==='operation'?'active':''} onClick={()=>onChange('operation')}>🚌<span>運行</span></button><button className={active==='children'?'active':''} onClick={()=>onChange('children')}>👧<span>園児</span></button><button className={active==='records'?'active':''} onClick={()=>onChange('records')}>▤<span>記録</span></button><button className={active==='settings'?'active':''} onClick={()=>onChange('settings')}>⚙<span>設定</span></button></nav> }
 type Detector={detect:(s:ImageBitmapSource)=>Promise<Array<{rawValue:string}>>}; declare global { interface Window { BarcodeDetector?:new(o:{formats:string[]})=>Detector } }
 function Scanner({title,onRead,onClose}:{title:string;onRead:(v:string)=>void;onClose:()=>void}) {
-  const video=useRef<HTMLVideoElement>(null),canvas=useRef<HTMLCanvasElement>(null),[manual,setManual]=useState(''),[cameraError,setCameraError]=useState('')
+  const video=useRef<HTMLVideoElement>(null),canvas=useRef<HTMLCanvasElement>(null),[manual,setManual]=useState(''),[cameraError,setCameraError]=useState(''),[scanStatus,setScanStatus]=useState('QRをカメラに近づけてください')
   useEffect(()=>{
-    let stream:MediaStream|undefined,timer=0,done=false
-    const submit=(value:string)=>{const normalized=value.trim();if(done||!normalized)return;done=true;onRead(normalized)}
+    let stream:MediaStream|undefined,timer=0,done=false,detector:Detector|undefined
+    const submit=(value:string)=>{const normalized=value.trim();if(done||!normalized)return;done=true;setScanStatus(`読み取りました：${normalized}`);onRead(normalized)}
+    const scanWithCanvas=()=>{const v=video.current,c=canvas.current;if(!v||!c||v.readyState<2)return;const width=v.videoWidth,height=v.videoHeight;if(!width||!height)return;c.width=width;c.height=height;const context=c.getContext('2d',{willReadFrequently:true});if(!context)return;context.drawImage(v,0,0,width,height);const image=context.getImageData(0,0,width,height);const code=jsQR(image.data,width,height,{inversionAttempts:'attemptBoth'});if(code?.data)submit(code.data)}
     ;(async()=>{try{
-      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}})
-      if(video.current)video.current.srcObject=stream
-      if(window.BarcodeDetector){
-        const detector=new window.BarcodeDetector({formats:['qr_code']})
-        timer=window.setInterval(async()=>{if(video.current&&video.current.readyState>=2){const found=await detector.detect(video.current);if(found[0])submit(found[0].rawValue)}},700)
-      } else {
-        timer=window.setInterval(()=>{const v=video.current,c=canvas.current;if(!v||!c||v.readyState<2)return;const width=v.videoWidth,height=v.videoHeight;if(!width||!height)return;c.width=width;c.height=height;const context=c.getContext('2d',{willReadFrequently:true});if(!context)return;context.drawImage(v,0,0,width,height);const image=context.getImageData(0,0,width,height);const code=jsQR(image.data,width,height);if(code?.data)submit(code.data)},450)
-      }
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}})
+      if(video.current){video.current.srcObject=stream;await video.current.play().catch(()=>undefined)}
+      if(window.BarcodeDetector) detector=new window.BarcodeDetector({formats:['qr_code']})
+      timer=window.setInterval(async()=>{if(done)return;try{if(detector&&video.current&&video.current.readyState>=2){const found=await detector.detect(video.current);if(found[0])submit(found[0].rawValue)}}catch{detector=undefined}scanWithCanvas()},300)
     }catch{setCameraError('カメラを利用できません。権限を許可するか、QR文字列を入力してください。')}})()
     return()=>{done=true;clearInterval(timer);stream?.getTracks().forEach(track=>track.stop())}
   },[onRead])
-  return <div className="modal"><div className="sheet"><h2 className="text-center text-xl font-black">{title}</h2><video ref={video} autoPlay playsInline muted className="w-full aspect-square bg-slate-900 rounded-2xl"/><canvas ref={canvas} className="hidden"/>{cameraError&&<p className="text-sm text-red-700">{cameraError}</p>}<div className="flex gap-2 mt-3"><input className="flex-1 border rounded-xl p-3" value={manual} onChange={e=>setManual(e.target.value)} placeholder="QR文字列"/><button className="bg-teal text-white rounded-xl px-3" onClick={()=>manual.trim()&&onRead(manual.trim())}>送信</button></div><button className="w-full p-3 border-0 bg-white" onClick={onClose}>キャンセル</button></div></div>
+  return <div className="modal"><div className="sheet"><h2 className="text-center text-xl font-black">{title}</h2><video ref={video} autoPlay playsInline muted className="w-full aspect-square bg-slate-900 rounded-2xl"/><canvas ref={canvas} className="hidden"/><p className="mb-0 mt-2 text-center text-xs text-slate-600">{cameraError||scanStatus}</p><div className="flex gap-2 mt-3"><input className="flex-1 border rounded-xl p-3" value={manual} onChange={e=>setManual(e.target.value)} placeholder="QR文字列"/><button className="bg-teal text-white rounded-xl px-3" onClick={()=>manual.trim()&&onRead(manual.trim())}>送信</button></div><button className="w-full p-3 border-0 bg-white" onClick={onClose}>キャンセル</button></div></div>
 }
