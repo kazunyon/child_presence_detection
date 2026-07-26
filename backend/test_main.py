@@ -1,10 +1,14 @@
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import HTTPException
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+import backend.main as main_module
 
 from backend.main import (
     AuditLog,
@@ -19,6 +23,7 @@ from backend.main import (
     create_vehicle,
     delete_route,
     delete_vehicle,
+    download_video,
     list_vehicles,
     trip_record,
     trip_summary,
@@ -409,6 +414,32 @@ class VehicleVideoEvidenceTest(unittest.TestCase):
             or video["storage_path"].endswith("uploads/1/video.webm")
         )
         self.assertEqual(video["content_type"], "video/webm")
+    def test_download_video_returns_same_org_file_response(self) -> None:
+        video = VideoEvidence(
+            organization_id=self.actor.organization_id,
+            trip_id=self.trip.id,
+            uploaded_by=self.actor.id,
+            file_name="vehicle.webm",
+            storage_key="1/video.webm",
+            content_type="video/webm",
+        )
+        self.db.add(video)
+        self.db.commit()
+        self.db.refresh(video)
+
+        original_upload_dir = main_module.UPLOAD_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main_module.UPLOAD_DIR = Path(temp_dir).resolve()
+            target = main_module.UPLOAD_DIR / video.storage_key
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"video-bytes")
+            try:
+                response = download_video(video.id, actor=self.actor, db=self.db)
+            finally:
+                main_module.UPLOAD_DIR = original_upload_dir
+
+        self.assertEqual(str(response.path), str(target))
+        self.assertEqual(response.media_type, "video/webm")
     def test_complete_requires_vehicle_video(self) -> None:
         with self.assertRaises(HTTPException) as context:
             complete_trip(self.trip.id, actor=self.actor, db=self.db)

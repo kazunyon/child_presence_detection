@@ -16,6 +16,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field
@@ -1024,12 +1025,27 @@ async def upload_video(trip_id: int, file: UploadFile = File(...), duration_seco
     item = VideoEvidence(organization_id=actor.organization_id, trip_id=trip_id, uploaded_by=actor.id, file_name=file.filename or "video", storage_key=key, content_type=file.content_type or "video/mp4")
     db.add(item); db.flush(); audit(db, actor, "video.upload", "video", item.id, {"size": size, "duration_seconds": duration_seconds}); db.commit(); return {"id": item.id, "ai_status": item.ai_status}
 
+@app.get("/api/videos/{video_id}/download")
+def download_video(video_id: int, actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+    item = db.query(VideoEvidence).filter_by(id=video_id, organization_id=actor.organization_id).first()
+    if not item: raise HTTPException(404, "動画が見つかりません")
+    target = (UPLOAD_DIR / item.storage_key).resolve()
+    if UPLOAD_DIR not in target.parents:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "動画の保存先が不正です")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, "動画ファイルが見つかりません。再デプロイ等で削除された可能性があります")
+    audit(db, actor, "video.download", "video", item.id)
+    db.commit()
+    return FileResponse(target, media_type=item.content_type, filename=item.file_name)
+
 @app.post("/api/videos/{video_id}/analyze")
 def analyze_video(video_id: int, actor: Staff = Depends(require_roles("admin", "operator", "verifier")), db: Session = Depends(get_db)):
     item = db.query(VideoEvidence).filter_by(id=video_id, organization_id=actor.organization_id).first()
     if not item: raise HTTPException(404, "動画が見つかりません")
     item.ai_status, item.ai_result = "needs_human_review", "AI補助: 子どもらしき人影や見えにくい場所の最終判断は未接続です。座席、足元、座席の下、荷物の陰を職員が再確認してください"
     audit(db, actor, "video.analyze.request", "video", item.id); db.commit(); return {"id": item.id, "ai_status": item.ai_status, "ai_result": item.ai_result}
+
+
 
 
 
