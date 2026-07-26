@@ -31,6 +31,13 @@ const vehicleOrder = (name:string) => Number(name.match(/\d+/)?.[0] || 9999)
 const directionOrder = (direction:string) => direction==='往路' || direction==='行き' ? 0 : direction==='帰り' ? 1 : 2
 const sortedRoutes = (routes:Route[], vehicles:Vehicle[]) => [...routes].sort((a,b)=>vehicleOrder(routeVehicleName(a,vehicles))-vehicleOrder(routeVehicleName(b,vehicles)) || directionOrder(a.direction)-directionOrder(b.direction) || routeVehicleName(a,vehicles).localeCompare(routeVehicleName(b,vehicles),'ja') || a.name.localeCompare(b.name,'ja'))
 const messageOf = async (response:Response) => { try { const body = await response.json(); return body.detail || '記録を保存できませんでした' } catch { return '記録を保存できませんでした' } }
+const fetchWithTimeout = async (url:string, init:RequestInit, timeoutMs:number, timeoutMessage:string) => {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try { return await fetch(url, {...init, signal: controller.signal}) }
+  catch(error) { if(error instanceof DOMException && error.name==='AbortError') throw new Error(timeoutMessage); throw error }
+  finally { window.clearTimeout(timer) }
+}
 const MIN_VIDEO_SECONDS = 5
 const MAX_VIDEO_SECONDS = 30
 
@@ -133,19 +140,26 @@ export default function App() {
   const uploadVehicleVideo = async (blob:Blob, durationSeconds:number) => {
     if (!trip) return
     const form = new FormData()
-    form.append('file', blob, `vehicle-check-${trip.trip_id}-${new Date().toISOString().replace(/[:.]/g,'-')}.webm`)
+    const extension = blob.type.includes('mp4') ? 'mp4' : 'webm'
+    form.append('file', blob, `vehicle-check-${trip.trip_id}-${new Date().toISOString().replace(/[:.]/g,'-')}.${extension}`)
     form.append('duration_seconds', String(durationSeconds))
     const headers:HeadersInit = token ? {Authorization:`Bearer ${token}`} : {}
     try {
-      const uploaded = await fetch(`${API}/api/trips/${trip.trip_id}/videos`, {method:'POST', headers, body:form})
+      const uploaded = await fetchWithTimeout(`${API}/api/trips/${trip.trip_id}/videos`, {method:'POST', headers, body:form}, VIDEO_UPLOAD_TIMEOUT_MS, '動画の保存に時間がかかっています。通信状況を確認して、もう一度撮影してください。')
       if(!uploaded.ok) throw new Error(await messageOf(uploaded))
       const video = await uploaded.json() as {id:number}
-      const analyzed = await fetch(`${API}/api/videos/${video.id}/analyze`, auth({method:'POST'}))
-      if(!analyzed.ok) throw new Error(await messageOf(analyzed))
-      const result = await analyzed.json() as VideoAnalysis
-      await refresh(trip.trip_id)
-      setVideoRecorder(false)
-      setMessage(result.ai_result || `${durationSeconds}秒の車内撮影とAI補助結果を保存しました。職員が再確認してください。`)
+      try {
+        const analyzed = await fetchWithTimeout(`${API}/api/videos/${video.id}/analyze`, auth({method:'POST'}), AI_ANALYZE_TIMEOUT_MS, 'AI補助確認が時間内に終わりませんでした')
+        if(!analyzed.ok) throw new Error(await messageOf(analyzed))
+        const result = await analyzed.json() as VideoAnalysis
+        await refresh(trip.trip_id)
+        setVideoRecorder(false)
+        setMessage(result.ai_result || `${durationSeconds}秒の車内撮影とAI補助結果を保存しました。職員が再確認してください。`)
+      } catch(error) {
+        await refresh(trip.trip_id)
+        setVideoRecorder(false)
+        setMessage(`動画は保存しました。AI補助だけ完了しませんでした（${error instanceof Error ? error.message : '通信エラー'}）。職員が車内を再確認してください。`)
+      }
     } catch(error) { setMessage(error instanceof Error ? error.message : '車内撮影を保存できませんでした'); throw error }
   }
   const approve = async (staffId:number,pin:string) => { if (!trip) return; try { const r=await fetch(`${API}/api/trips/${trip.trip_id}/third-party-approval`,auth({method:'POST',body:JSON.stringify({staff_id:staffId,pin})})); if(!r.ok) throw new Error(await messageOf(r)); await refresh(trip.trip_id); setMessage('第三者確認を記録しました。完了処理が可能です。') } catch(error) { setMessage(error instanceof Error ? error.message : '第三者確認を保存できませんでした') } }
@@ -225,7 +239,7 @@ function VehicleVideoRecorder({trip,onUpload,onClose}:{trip:TripStatus;onUpload:
     let cancelled=false
     ;(async()=>{try{
       if(!navigator.mediaDevices?.getUserMedia) throw new Error('この端末はカメラ撮影に対応していません')
-      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false})
+      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480},frameRate:{ideal:15,max:24}},audio:false})
       if(cancelled){stream.getTracks().forEach(track=>track.stop());return}
       streamRef.current=stream
       if(video.current){video.current.srcObject=stream;await video.current.play().catch(()=>undefined)}
@@ -243,8 +257,8 @@ function VehicleVideoRecorder({trip,onUpload,onClose}:{trip:TripStatus;onUpload:
     void requestWakeLock()
     chunksRef.current=[]
     startedAtRef.current=Date.now()
-    const mimeType=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':MediaRecorder.isTypeSupported('video/webm')?'video/webm':''
-    const recorder=new MediaRecorder(streamRef.current,mimeType?{mimeType}:undefined)
+    const mimeType=MediaRecorder.isTypeSupported('video/mp4')?'video/mp4':MediaRecorder.isTypeSupported('video/webm;codecs=vp8')?'video/webm;codecs=vp8':MediaRecorder.isTypeSupported('video/webm')?'video/webm':''
+    const recorder=new MediaRecorder(streamRef.current,{...(mimeType?{mimeType}:{}),videoBitsPerSecond:700000})
     recorderRef.current=recorder
     recorder.ondataavailable=event=>{if(event.data.size>0)chunksRef.current.push(event.data)}
     recorder.onstop=()=>{void (async()=>{try{const durationSeconds=Math.min(MAX_VIDEO_SECONDS,Math.round((Date.now()-startedAtRef.current)/1000));if(durationSeconds<MIN_VIDEO_SECONDS)throw new Error(`${MIN_VIDEO_SECONDS}秒以上撮影してください`);const blob=new Blob(chunksRef.current,{type:recorder.mimeType||'video/webm'});if(!blob.size)throw new Error('動画を記録できませんでした');setElapsed(durationSeconds);setPhase('uploading');setNotice('動画を保存し、AI補助確認を実行しています。画面は開いたままにしてください。');await onUpload(blob,durationSeconds)}catch(err){setPhase('ready');setNotice('撮影をやり直してください。');setError(err instanceof Error?err.message:'動画を保存できませんでした')}finally{void releaseWakeLock()}})()}
@@ -392,6 +406,10 @@ function Scanner({title,onRead,onClose}:{title:string;onRead:(v:string)=>void;on
   },[onRead])
   return <div className="modal"><div className="sheet"><h2 className="text-center text-xl font-black">{title}</h2><video ref={video} autoPlay playsInline muted className="w-full aspect-square bg-slate-900 rounded-2xl"/><canvas ref={canvas} className="hidden"/><p className="mb-0 mt-2 text-center text-xs text-slate-600">{cameraError||scanStatus}</p><div className="flex gap-2 mt-3"><input className="flex-1 border rounded-xl p-3" value={manual} onChange={e=>setManual(e.target.value)} placeholder="QR文字列"/><button className="bg-teal text-white rounded-xl px-3" onClick={()=>manual.trim()&&onRead(manual.trim())}>送信</button></div><button className="w-full p-3 border-0 bg-white" onClick={onClose}>キャンセル</button></div></div>
 }
+
+
+
+
 
 
 
