@@ -14,7 +14,7 @@ from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -389,6 +389,8 @@ def trip_summary(db: Session, trip: BusTrip) -> dict:
     boarded = sum(x["boarded_at"] is not None for x in children)
     alighted = sum(x["alighted_at"] is not None for x in children)
     check_types = {row[0] for row in db.query(VehicleSafetyCheck.check_type).filter_by(organization_id=trip.organization_id, trip_id=trip.id).all()}
+    videos = db.query(VideoEvidence).filter_by(organization_id=trip.organization_id, trip_id=trip.id).order_by(VideoEvidence.created_at.desc()).all()
+    latest_video = videos[0] if videos else None
     return {
         "trip_id": trip.id,
         "status": trip.status,
@@ -400,6 +402,10 @@ def trip_summary(db: Session, trip: BusTrip) -> dict:
         "unconfirmed": boarded - alighted,
         "tail_confirmed": "tail_qr" in check_types,
         "third_party_confirmed": "third_party" in check_types,
+        "video_evidence_count": len(videos),
+        "latest_video_id": latest_video.id if latest_video else None,
+        "latest_video_ai_status": latest_video.ai_status if latest_video else None,
+        "latest_video_ai_result": latest_video.ai_result if latest_video else None,
         "children": children,
     }
 
@@ -832,6 +838,7 @@ def trip_record(trip_id: int, actor: Staff = Depends(current_staff), db: Session
     vehicle = db.query(Vehicle).filter_by(id=trip.vehicle_id, organization_id=actor.organization_id).first() if trip.vehicle_id else None
     attendance = db.query(TripAttendance, Child).join(Child, Child.id == TripAttendance.child_id).filter(TripAttendance.trip_id == trip.id).order_by(TripAttendance.boarded_at.asc()).all()
     checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id).order_by(VehicleSafetyCheck.created_at.asc()).all()
+    videos = db.query(VideoEvidence).filter_by(organization_id=actor.organization_id, trip_id=trip.id).order_by(VideoEvidence.created_at.asc()).all()
     return {
         "trip": trip_summary(db, trip) | {
             "route_name": route.name if route else "便名未設定",
@@ -849,6 +856,10 @@ def trip_record(trip_id: int, actor: Staff = Depends(current_staff), db: Session
             "id": item.id, "check_type": item.check_type, "staff_name": item.staff_name,
             "latitude": item.latitude, "longitude": item.longitude, "created_at": item.created_at,
         } for item in checks],
+        "videos": [{
+            "id": item.id, "file_name": item.file_name, "ai_status": item.ai_status,
+            "ai_result": item.ai_result, "created_at": item.created_at,
+        } for item in videos],
     }
 
 @app.post("/api/trips/{trip_id}/third-party-approval")
@@ -869,6 +880,8 @@ def complete_trip(trip_id: int, actor: Staff = Depends(require_roles("operator",
     if summary["unconfirmed"]: raise HTTPException(status.HTTP_409_CONFLICT, "未降車の園児がいるため完了できません")
     checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="tail_qr").count()
     if not checks: raise HTTPException(status.HTTP_409_CONFLICT, "最後尾確認が必要です")
+    videos = db.query(VideoEvidence).filter_by(organization_id=actor.organization_id, trip_id=trip.id).count()
+    if not videos: raise HTTPException(status.HTTP_409_CONFLICT, "30秒の車内撮影が必要です")
     approvals = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="third_party").count()
     if not approvals: raise HTTPException(status.HTTP_409_CONFLICT, "第三者確認が必要です")
     trip.status = "完了"; trip.completed_at = datetime.now(timezone.utc); audit(db, actor, "trip.complete", "trip", trip.id); db.commit(); return {"status": "完了"}
@@ -986,9 +999,10 @@ def sync(data: SyncIn, actor: Staff = Depends(current_staff), db: Session = Depe
     db.commit(); return {"results": results}
 
 @app.post("/api/trips/{trip_id}/videos", status_code=status.HTTP_201_CREATED)
-async def upload_video(trip_id: int, file: UploadFile = File(...), actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
+async def upload_video(trip_id: int, file: UploadFile = File(...), duration_seconds: int | None = Form(None), actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     trip_for_org(db, trip_id, actor)
     if not (file.content_type or "").startswith("video/"): raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "動画ファイルを指定してください")
+    if duration_seconds is not None and duration_seconds < 30: raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "車内動画は30秒以上撮影してください")
     suffix = Path(file.filename or "video.mp4").suffix[:10] or ".mp4"
     key = f"{actor.organization_id}/{uuid4()}{suffix}"
     target = UPLOAD_DIR / key; target.parent.mkdir(parents=True, exist_ok=True)
@@ -999,11 +1013,12 @@ async def upload_video(trip_id: int, file: UploadFile = File(...), actor: Staff 
             if size > 100 * 1024 * 1024: out.close(); target.unlink(missing_ok=True); raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "動画は100MB以下にしてください")
             out.write(chunk)
     item = VideoEvidence(organization_id=actor.organization_id, trip_id=trip_id, uploaded_by=actor.id, file_name=file.filename or "video", storage_key=key, content_type=file.content_type or "video/mp4")
-    db.add(item); db.flush(); audit(db, actor, "video.upload", "video", item.id, {"size": size}); db.commit(); return {"id": item.id, "ai_status": item.ai_status}
+    db.add(item); db.flush(); audit(db, actor, "video.upload", "video", item.id, {"size": size, "duration_seconds": duration_seconds}); db.commit(); return {"id": item.id, "ai_status": item.ai_status}
 
 @app.post("/api/videos/{video_id}/analyze")
-def analyze_video(video_id: int, actor: Staff = Depends(require_roles("admin", "verifier")), db: Session = Depends(get_db)):
+def analyze_video(video_id: int, actor: Staff = Depends(require_roles("admin", "operator", "verifier")), db: Session = Depends(get_db)):
     item = db.query(VideoEvidence).filter_by(id=video_id, organization_id=actor.organization_id).first()
     if not item: raise HTTPException(404, "動画が見つかりません")
-    item.ai_status, item.ai_result = "pending_provider", "AIプロバイダー未接続: 人による目視確認が必要です"
+    item.ai_status, item.ai_result = "needs_human_review", "AI補助: 子どもらしき人影や見えにくい場所の最終判断は未接続です。座席、足元、座席の下、荷物の陰を職員が再確認してください"
     audit(db, actor, "video.analyze.request", "video", item.id); db.commit(); return {"id": item.id, "ai_status": item.ai_status, "ai_result": item.ai_result}
+

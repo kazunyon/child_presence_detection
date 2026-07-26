@@ -11,6 +11,8 @@ from backend.main import (
     BusRoute,
     RouteChild,
     Vehicle,
+    VehicleSafetyCheck,
+    VideoEvidence,
     TripCreate,
     VehicleCreate,
     create_trip,
@@ -26,6 +28,7 @@ from backend.main import (
     Staff,
     TripAttendance,
     cancel_unstarted_trip,
+    complete_trip,
     dashboard,
     hash_pin,
     list_routes,
@@ -299,5 +302,97 @@ class VehicleDeletionTest(unittest.TestCase):
         )
 
 
+
+class VehicleVideoEvidenceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        self.db = sessionmaker(bind=engine)()
+
+        organization = Organization(name="テスト園")
+        self.db.add(organization)
+        self.db.flush()
+        self.actor = Staff(
+            organization_id=organization.id,
+            name="管理者",
+            role="admin",
+            password_hash=hash_pin("test-pin"),
+        )
+        child = Child(
+            organization_id=organization.id,
+            name="園児",
+            qr_token="test-child",
+        )
+        self.db.add_all([self.actor, child])
+        self.db.flush()
+        now = datetime.now(timezone.utc)
+        self.trip = BusTrip(
+            organization_id=organization.id,
+            direction="帰り",
+            status="運行中",
+            started_at=now,
+        )
+        self.db.add(self.trip)
+        self.db.flush()
+        self.db.add_all([
+            TripAttendance(
+                trip_id=self.trip.id,
+                child_id=child.id,
+                boarded_at=now,
+                alighted_at=now,
+                boarded_by="通常名簿",
+                alighted_by=self.actor.name,
+            ),
+            VehicleSafetyCheck(
+                organization_id=organization.id,
+                trip_id=self.trip.id,
+                check_type="tail_qr",
+                staff_id=self.actor.id,
+                staff_name=self.actor.name,
+                qr_token="bus-tail-2",
+            ),
+            VehicleSafetyCheck(
+                organization_id=organization.id,
+                trip_id=self.trip.id,
+                check_type="third_party",
+                staff_id=self.actor.id,
+                staff_name=self.actor.name,
+                qr_token="third-party-confirmed",
+            ),
+        ])
+        self.db.commit()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_trip_summary_includes_latest_video_ai_status(self) -> None:
+        self.db.add(VideoEvidence(
+            organization_id=self.actor.organization_id,
+            trip_id=self.trip.id,
+            uploaded_by=self.actor.id,
+            file_name="vehicle.webm",
+            storage_key="1/video.webm",
+            content_type="video/webm",
+            ai_status="needs_human_review",
+            ai_result="再確認してください",
+        ))
+        self.db.commit()
+
+        result = trip_summary(self.db, self.trip)
+
+        self.assertEqual(result["video_evidence_count"], 1)
+        self.assertEqual(result["latest_video_ai_status"], "needs_human_review")
+        self.assertEqual(result["latest_video_ai_result"], "再確認してください")
+
+    def test_complete_requires_vehicle_video(self) -> None:
+        with self.assertRaises(HTTPException) as context:
+            complete_trip(self.trip.id, actor=self.actor, db=self.db)
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(context.exception.detail, "30秒の車内撮影が必要です")
+        self.assertEqual(self.trip.status, "運行中")
+
 if __name__ == "__main__":
     unittest.main()
+
+
