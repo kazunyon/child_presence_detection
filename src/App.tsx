@@ -184,7 +184,7 @@ const checkLabel = (value:string) => value==='tail_qr' ? '最後尾QR・車内�
 const parseDetail = (value:string) => { try { const parsed=JSON.parse(value); return Object.keys(parsed).length ? JSON.stringify(parsed) : '—' } catch { return value || '—' } }
 
 function Records({operator,auth,onMessage,onResume}:{operator:Operator;auth:AuthBuilder;onMessage:(message:string)=>void;onResume:(item:TripListItem)=>void}) {
-  const [fromDate,setFromDate] = useState(()=>formatJstDate(new Date(Date.now()-30*24*60*60*1000)))
+  const [fromDate,setFromDate] = useState(()=>formatJstDate(new Date()))
   const [toDate,setToDate] = useState(()=>formatJstDate(new Date()))
   const [trips,setTrips] = useState<TripListItem[]>([])
   const [selected,setSelected] = useState<TripRecord|null>(null)
