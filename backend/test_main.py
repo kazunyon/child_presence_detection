@@ -21,6 +21,7 @@ from backend.main import (
     delete_vehicle,
     list_vehicles,
     trip_summary,
+    validate_video_duration,
     Base,
     BusTrip,
     Child,
@@ -389,10 +390,20 @@ class VehicleVideoEvidenceTest(unittest.TestCase):
             complete_trip(self.trip.id, actor=self.actor, db=self.db)
 
         self.assertEqual(context.exception.status_code, 409)
-        self.assertEqual(context.exception.detail, "30秒の車内撮影が必要です")
+        self.assertEqual(context.exception.detail, "5秒以上の車内撮影が必要です")
         self.assertEqual(self.trip.status, "運行中")
+
+    def test_video_duration_allows_5_to_30_seconds(self) -> None:
+        validate_video_duration(5)
+        validate_video_duration(30)
+
+    def test_video_duration_rejects_less_than_5_or_over_30_seconds(self) -> None:
+        for duration in (4, 31):
+            with self.subTest(duration=duration):
+                with self.assertRaises(HTTPException) as context:
+                    validate_video_duration(duration)
+                self.assertEqual(context.exception.status_code, 422)
 
 if __name__ == "__main__":
     unittest.main()
-
 

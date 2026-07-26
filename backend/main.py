@@ -347,6 +347,11 @@ def route_public(db: Session, route: BusRoute) -> dict:
             "children": [{"id": child.id, "name": child.name, "class_name": child.class_name} for child in route_children(db, route.id)]}
 
 
+def validate_video_duration(duration_seconds: int | None) -> None:
+    if duration_seconds is not None and not 5 <= duration_seconds <= 30:
+        raise HTTPException(422, "車内動画は5秒以上30秒以内で撮影してください")
+
+
 def replace_route_roster(db: Session, actor: Staff, route: BusRoute, child_ids: list[int]) -> None:
     wanted = list(dict.fromkeys(child_ids))
     valid = {child.id for child in db.query(Child).filter(Child.organization_id == actor.organization_id, Child.id.in_(wanted)).all()} if wanted else set()
@@ -881,7 +886,7 @@ def complete_trip(trip_id: int, actor: Staff = Depends(require_roles("operator",
     checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="tail_qr").count()
     if not checks: raise HTTPException(status.HTTP_409_CONFLICT, "最後尾確認が必要です")
     videos = db.query(VideoEvidence).filter_by(organization_id=actor.organization_id, trip_id=trip.id).count()
-    if not videos: raise HTTPException(status.HTTP_409_CONFLICT, "30秒の車内撮影が必要です")
+    if not videos: raise HTTPException(status.HTTP_409_CONFLICT, "5秒以上の車内撮影が必要です")
     approvals = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="third_party").count()
     if not approvals: raise HTTPException(status.HTTP_409_CONFLICT, "第三者確認が必要です")
     trip.status = "完了"; trip.completed_at = datetime.now(timezone.utc); audit(db, actor, "trip.complete", "trip", trip.id); db.commit(); return {"status": "完了"}
@@ -1002,7 +1007,7 @@ def sync(data: SyncIn, actor: Staff = Depends(current_staff), db: Session = Depe
 async def upload_video(trip_id: int, file: UploadFile = File(...), duration_seconds: int | None = Form(None), actor: Staff = Depends(current_staff), db: Session = Depends(get_db)):
     trip_for_org(db, trip_id, actor)
     if not (file.content_type or "").startswith("video/"): raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "動画ファイルを指定してください")
-    if duration_seconds is not None and duration_seconds < 30: raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "車内動画は30秒以上撮影してください")
+    validate_video_duration(duration_seconds)
     suffix = Path(file.filename or "video.mp4").suffix[:10] or ".mp4"
     key = f"{actor.organization_id}/{uuid4()}{suffix}"
     target = UPLOAD_DIR / key; target.parent.mkdir(parents=True, exist_ok=True)
@@ -1021,4 +1026,7 @@ def analyze_video(video_id: int, actor: Staff = Depends(require_roles("admin", "
     if not item: raise HTTPException(404, "動画が見つかりません")
     item.ai_status, item.ai_result = "needs_human_review", "AI補助: 子どもらしき人影や見えにくい場所の最終判断は未接続です。座席、足元、座席の下、荷物の陰を職員が再確認してください"
     audit(db, actor, "video.analyze.request", "video", item.id); db.commit(); return {"id": item.id, "ai_status": item.ai_status, "ai_result": item.ai_result}
+
+
+
 
