@@ -40,6 +40,8 @@ const fetchWithTimeout = async (url:string, init:RequestInit, timeoutMs:number, 
 }
 const MIN_VIDEO_SECONDS = 5
 const MAX_VIDEO_SECONDS = 30
+const VIDEO_UPLOAD_TIMEOUT_MS = 120000
+const AI_ANALYZE_TIMEOUT_MS = 30000
 
 export default function App() {
   const [view,setView] = useState<View>('home')
@@ -406,6 +408,7 @@ function Scanner({title,onRead,onClose}:{title:string;onRead:(v:string)=>void;on
   },[onRead])
   return <div className="modal"><div className="sheet"><h2 className="text-center text-xl font-black">{title}</h2><video ref={video} autoPlay playsInline muted className="w-full aspect-square bg-slate-900 rounded-2xl"/><canvas ref={canvas} className="hidden"/><p className="mb-0 mt-2 text-center text-xs text-slate-600">{cameraError||scanStatus}</p><div className="flex gap-2 mt-3"><input className="flex-1 border rounded-xl p-3" value={manual} onChange={e=>setManual(e.target.value)} placeholder="QR文字列"/><button className="bg-teal text-white rounded-xl px-3" onClick={()=>manual.trim()&&onRead(manual.trim())}>送信</button></div><button className="w-full p-3 border-0 bg-white" onClick={onClose}>キャンセル</button></div></div>
 }
+
 
 
 
