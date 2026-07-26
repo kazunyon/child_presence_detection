@@ -862,7 +862,11 @@ def trip_record(trip_id: int, actor: Staff = Depends(current_staff), db: Session
             "latitude": item.latitude, "longitude": item.longitude, "created_at": item.created_at,
         } for item in checks],
         "videos": [{
-            "id": item.id, "file_name": item.file_name, "ai_status": item.ai_status,
+            "id": item.id, "file_name": item.file_name,
+            "storage_key": item.storage_key,
+            "storage_path": str(UPLOAD_DIR / item.storage_key),
+            "content_type": item.content_type,
+            "ai_status": item.ai_status,
             "ai_result": item.ai_result, "created_at": item.created_at,
         } for item in videos],
     }
@@ -1026,6 +1030,7 @@ def analyze_video(video_id: int, actor: Staff = Depends(require_roles("admin", "
     if not item: raise HTTPException(404, "動画が見つかりません")
     item.ai_status, item.ai_result = "needs_human_review", "AI補助: 子どもらしき人影や見えにくい場所の最終判断は未接続です。座席、足元、座席の下、荷物の陰を職員が再確認してください"
     audit(db, actor, "video.analyze.request", "video", item.id); db.commit(); return {"id": item.id, "ai_status": item.ai_status, "ai_result": item.ai_result}
+
 
 
 

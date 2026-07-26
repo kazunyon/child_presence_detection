@@ -20,6 +20,7 @@ from backend.main import (
     delete_route,
     delete_vehicle,
     list_vehicles,
+    trip_record,
     trip_summary,
     validate_video_duration,
     Base,
@@ -385,6 +386,29 @@ class VehicleVideoEvidenceTest(unittest.TestCase):
         self.assertEqual(result["latest_video_ai_status"], "needs_human_review")
         self.assertEqual(result["latest_video_ai_result"], "再確認してください")
 
+    def test_trip_record_includes_video_storage_location(self) -> None:
+        self.db.add(VideoEvidence(
+            organization_id=self.actor.organization_id,
+            trip_id=self.trip.id,
+            uploaded_by=self.actor.id,
+            file_name="vehicle.webm",
+            storage_key="1/video.webm",
+            content_type="video/webm",
+            ai_status="needs_human_review",
+            ai_result="再確認してください",
+        ))
+        self.db.commit()
+
+        result = trip_record(self.trip.id, actor=self.actor, db=self.db)
+        video = result["videos"][0]
+
+        self.assertEqual(video["id"], 1)
+        self.assertEqual(video["storage_key"], "1/video.webm")
+        self.assertTrue(
+            video["storage_path"].endswith("uploads\\1\\video.webm")
+            or video["storage_path"].endswith("uploads/1/video.webm")
+        )
+        self.assertEqual(video["content_type"], "video/webm")
     def test_complete_requires_vehicle_video(self) -> None:
         with self.assertRaises(HTTPException) as context:
             complete_trip(self.trip.id, actor=self.actor, db=self.db)
