@@ -587,6 +587,50 @@ class LineGuardianNotificationTest(unittest.TestCase):
         self.assertEqual(contact.guardian_contact_id, guardian.id)
         self.assertEqual(self.db.query(main_module.LineContact).count(), 1)
 
+    def test_signed_webhook_uses_link_request_org_when_render_org_is_stale(self) -> None:
+        result = self.create_guardian()
+        guardian = self.db.get(main_module.GuardianContact, result["id"])
+        guardian.line_status = "pending"
+        request_row = main_module.LineLinkRequest(
+            organization_id=self.organization.id,
+            guardian_contact_id=guardian.id,
+            token_hash=main_module.line_link_token_hash("stale-org-token"),
+            expires_at=main_module.utc_now() + main_module.timedelta(hours=1),
+            requested_by=self.actor.id,
+        )
+        self.db.add(request_row); self.db.commit()
+        payload = {"events": [{
+            "type": "message", "webhookEventId": "evt-stale-org", "replyToken": "reply-stale-org",
+            "source": {"userId": "U-stale-org"},
+            "message": {"type": "text", "text": "連携 stale-org-token"},
+        }]}
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        secret = "line-secret"
+        signature = base64.b64encode(hmac.new(secret.encode(), body, hashlib.sha256).digest()).decode()
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request = Request({
+            "type": "http", "method": "POST", "path": "/api/integrations/line/webhook",
+            "headers": [(b"x-line-signature", signature.encode())],
+        }, receive)
+
+        with patch.object(main_module, "LINE_CHANNEL_SECRET", secret), patch.object(main_module, "LINE_ORGANIZATION_ID", 999), patch.object(main_module, "LINE_CHANNEL_ACCESS_TOKEN", None):
+            asyncio.run(main_module.line_webhook(request, self.db))
+
+        self.db.refresh(guardian); self.db.refresh(request_row)
+        contact = self.db.query(main_module.LineContact).filter_by(line_user_id="U-stale-org").one()
+        self.assertEqual(guardian.line_status, "linked")
+        self.assertEqual(request_row.status, "used")
+        self.assertEqual(contact.organization_id, self.organization.id)
+        self.assertEqual(contact.guardian_contact_id, guardian.id)
+
     def test_alighted_event_creates_line_and_email_once(self) -> None:
         result = self.create_guardian()
         guardian = self.db.get(main_module.GuardianContact, result["id"])

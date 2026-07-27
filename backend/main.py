@@ -1518,46 +1518,90 @@ async def line_webhook(request: Request, db: Session = Depends(get_db)) -> None:
         events = json.loads(body.decode("utf-8")).get("events", [])
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "LINE Webhook JSONが不正です")
+    configured_organization = db.get(Organization, LINE_ORGANIZATION_ID)
     for event in events:
         user_id = event.get("source", {}).get("userId")
         if not user_id:
             continue
         webhook_event_id = event.get("webhookEventId")
-        contact = db.query(LineContact).filter_by(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id).first()
+        event_type = event.get("type")
+        text_message = (
+            event.get("message", {}).get("text", "").strip()
+            if event_type == "message" and event.get("message", {}).get("type") == "text"
+            else ""
+        )
+        raw_token = text_message[3:].strip() if text_message.startswith("連携 ") else ""
+        link_request = (
+            db.query(LineLinkRequest).filter_by(token_hash=line_link_token_hash(raw_token)).first()
+            if raw_token else None
+        )
+
+        # A link token is issued inside an authenticated organization, so it is
+        # the authoritative tenant key for the link event. This also prevents a
+        # stale Render organization ID from causing a foreign-key failure before
+        # the token can be validated.
+        event_organization_id = (
+            link_request.organization_id
+            if link_request
+            else configured_organization.id if configured_organization else None
+        )
+        contact_query = db.query(LineContact).filter(LineContact.line_user_id == user_id)
+        if event_organization_id:
+            contact_query = contact_query.filter(LineContact.organization_id == event_organization_id)
+        contact = contact_query.first()
         if contact and webhook_event_id and contact.last_webhook_event_id == webhook_event_id:
             continue
-        if not contact:
-            contact = LineContact(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id)
-            db.add(contact); db.flush()
-        contact.last_webhook_event_id, contact.last_event_at = webhook_event_id, utc_now()
-        event_type = event.get("type")
+
         if event_type == "unfollow":
+            if not contact:
+                continue
+            contact.last_webhook_event_id, contact.last_event_at = webhook_event_id, utc_now()
             contact.is_active = False
             if contact.guardian_contact_id:
                 guardian = db.get(GuardianContact, contact.guardian_contact_id)
-                if guardian and guardian.organization_id == LINE_ORGANIZATION_ID:
+                if guardian and guardian.organization_id == contact.organization_id:
                     guardian.line_status, guardian.updated_at = "unfollowed", utc_now()
-            audit(db, None, "line.contact.unfollow", "line_contact", contact.id, organization_id=LINE_ORGANIZATION_ID)
+            audit(db, None, "line.contact.unfollow", "line_contact", contact.id, organization_id=contact.organization_id)
             continue
-        contact.is_active = True
+
         if event_type != "message" or event.get("message", {}).get("type") != "text":
+            if contact:
+                contact.is_active = True
+                contact.last_webhook_event_id, contact.last_event_at = webhook_event_id, utc_now()
             continue
-        text_message = event.get("message", {}).get("text", "").strip()
         if not text_message.startswith("連携 "):
+            if contact:
+                contact.is_active = True
+                contact.last_webhook_event_id, contact.last_event_at = webhook_event_id, utc_now()
             continue
-        raw_token = text_message[3:].strip()
-        link_request = db.query(LineLinkRequest).filter_by(token_hash=line_link_token_hash(raw_token)).first()
+
         reply = "連携情報を確認できませんでした。園へQR案内の再発行をご依頼ください。"
-        if link_request and link_request.organization_id == LINE_ORGANIZATION_ID:
-            guardian = db.query(GuardianContact).filter_by(id=link_request.guardian_contact_id, organization_id=LINE_ORGANIZATION_ID).first()
+        organization_matches = (
+            link_request
+            and (not configured_organization or link_request.organization_id == configured_organization.id)
+        )
+        if organization_matches:
+            guardian = db.query(GuardianContact).filter_by(
+                id=link_request.guardian_contact_id,
+                organization_id=link_request.organization_id,
+            ).first()
             if link_request.status == "pending" and link_request.expires_at < utc_now():
                 link_request.status = "expired"
                 if guardian:
                     guardian.line_status, guardian.updated_at = "expired", utc_now()
                 reply = "連携期限が切れています。園へQR案内の再発行をご依頼ください。"
             elif link_request.status == "pending" and guardian and guardian.is_active and guardian.line_enabled and guardian.consented_at:
+                if not contact:
+                    contact = LineContact(
+                        organization_id=link_request.organization_id,
+                        line_user_id=user_id,
+                    )
+                    db.add(contact)
+                    db.flush()
+                contact.is_active = True
+                contact.last_webhook_event_id, contact.last_event_at = webhook_event_id, utc_now()
                 existing = db.query(LineContact).filter(
-                    LineContact.organization_id == LINE_ORGANIZATION_ID,
+                    LineContact.organization_id == link_request.organization_id,
                     LineContact.guardian_contact_id == guardian.id,
                     LineContact.id != contact.id,
                 ).first()
@@ -1572,7 +1616,7 @@ async def line_webhook(request: Request, db: Session = Depends(get_db)) -> None:
                     reply = f"{LINE_OFFICIAL_ACCOUNT_NAME}のLINE通知連携が完了しました。"
                     audit(db, None, "line.contact.link", "guardian_contact", guardian.id, {
                         "line_contact_id": contact.id, "line_link_request_id": link_request.id,
-                    }, organization_id=LINE_ORGANIZATION_ID)
+                    }, organization_id=link_request.organization_id)
         dispatch_line_reply(event.get("replyToken", ""), reply)
     db.commit()
 
