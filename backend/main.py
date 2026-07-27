@@ -1323,6 +1323,7 @@ def issue_line_link_request_for_guardian(guardian: GuardianContact, actor: Staff
         "official_account_name": LINE_OFFICIAL_ACCOUNT_NAME,
         "line_basic_id": LINE_BASIC_ID,
         "line_link_url": talk_url,
+        "line_link_message": f"連携 {raw_token}",
         "qr_png_data_url": qr_data_url,
     }
 
