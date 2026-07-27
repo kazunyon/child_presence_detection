@@ -32,7 +32,7 @@ services:
       - key: LINE_CHANNEL_SECRET
         sync: false
       - key: LINE_BASIC_ID
-        value: '@408mrkbk'
+        value: '@785ntzvy'
       - key: LINE_OFFICIAL_ACCOUNT_NAME
         value: バナナ幼稚園
       - key: LINE_LINK_TOKEN_PEPPER

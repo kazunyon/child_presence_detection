@@ -549,7 +549,7 @@ def build_document() -> None:
         "重要前提",
         "「LINE通知を希望する保護者はメールアドレスを必須登録し、QRでLINEを紐付ける。通知はLINEとメールへ併送する」と解釈した設計である。"
         "QR案内はメール本文にQR画像とタップ可能なリンクを併記し、スマートフォンだけでも連携できるようにする。"
-        "採用するLINE公式アカウントは「バナナ幼稚園」（LINE ID：@408mrkbk）とする。",
+        "採用するLINE公式アカウントは「バナナ幼稚園」（LINE ID：@785ntzvy）とする。",
     )
     add_body(doc, "現行のLINE API実装は土台として再利用するが、園児・保護者・メール・LINE userIdの対応付け、同意、画面、再送、到達確認は追加実装対象である。")
 
@@ -559,7 +559,7 @@ def build_document() -> None:
         ["版", "日付", "変更内容", "作成／確認"],
         [
             ["1.0", "2026-07-27", "初版。QR連携、保護者メール、LINE／メール併送の詳細設計を作成", "Codex作成／人による承認待ち"],
-            ["1.1", "2026-07-27", "採用LINE公式アカウント「バナナ幼稚園」（@408mrkbk）を追記", "利用アカウントは依頼者指定"],
+            ["1.1", "2026-07-27", "採用LINE公式アカウント「バナナ幼稚園」（@785ntzvy）を追記", "利用アカウントは依頼者指定"],
         ],
         [0.8, 1.3, 6.8, 1.7],
     )
@@ -595,7 +595,7 @@ def build_document() -> None:
             ["保護者連絡先", "メールアドレスを必須とし、1人以上の園児と紐付く通知先。兄弟姉妹は同一連絡先へ複数紐付け可能。"],
             ["LINE連携要求", "保護者連絡先とLINE userIdを結ぶための、期限付き・一回限りのトークン。"],
             ["QR連携", "QR内のLINEトーク起動URLから、事前入力された連携トークンを公式アカウントへ送信して紐付ける方式。"],
-            ["採用LINE公式アカウント", "「バナナ幼稚園」（LINE ID：@408mrkbk）。QR連携、Webhook受信、Push送信に使用する。"],
+            ["採用LINE公式アカウント", "「バナナ幼稚園」（LINE ID：@785ntzvy）。QR連携、Webhook受信、Push送信に使用する。"],
             ["併送", "同一通知イベントについてLINE用とメール用の通知キューを別レコードで作成し、独立送信すること。"],
             ["event_key", "同一園児・同一運行・同一通知種別の二重生成を防ぐ一意キー。"],
         ],
@@ -641,18 +641,18 @@ def build_document() -> None:
         ["項目", "設定値", "設計上の扱い"],
         [
             ["公式アカウント名", "バナナ幼稚園", "保護者に表示される通知元・連携先"],
-            ["LINE ID（Basic ID）", "@408mrkbk", "LINE_BASIC_IDへ設定"],
-            ["アカウントページ", "https://page.line.biz/account/@408mrkbk", "管理・確認用。保護者向け案内はQR／連携リンクを使用"],
-            ["トーク起動先", "https://line.me/R/oaMessage/@408mrkbk/", "QRとメール内の連携リンク生成に使用"],
+            ["LINE ID（Basic ID）", "@785ntzvy", "LINE_BASIC_IDへ設定"],
+            ["アカウントページ", "https://page.line.biz/account/@785ntzvy", "管理・確認用。保護者向け案内はQR／連携リンクを使用"],
+            ["トーク起動先", "https://line.me/R/oaMessage/%40785ntzvy/", "QRとメール内の連携リンク生成に使用"],
         ],
         [2.2, 4.0, 4.4],
         8.2,
     )
     add_body(doc, "QRにはメールアドレス、園児名、LINE userIdを含めず、Messaging API公式アカウントのトークを起動し、一回限りの連携トークンを入力済みにするURLだけを格納する。")
-    add_code_block(doc, "QR payload（採用値）:\nhttps://line.me/R/oaMessage/@408mrkbk/?{URL_ENCODED('連携 ' + raw_token)}")
+    add_code_block(doc, "QR payload（採用値）:\nhttps://line.me/R/oaMessage/%40785ntzvy/?{URL_ENCODED('連携 ' + raw_token)}")
     add_bullet(doc, "保護者は送信前に「連携 <token>」を確認し、送信操作で確定する。")
     add_bullet(doc, "メールにはQR画像と同じ遷移先のリンクを併記し、同じ端末でメールを開いた場合も連携できる。")
-    add_bullet(doc, "LINE_BASIC_IDは@408mrkbkを設定する。LINE側URL仕様は実装時にLINE Developers公式仕様と実機で再確認する。")
+    add_bullet(doc, "LINE_BASIC_IDは@785ntzvyを設定する。LINE側URL仕様は実装時にLINE Developers公式仕様と実機で再確認する。")
     add_bullet(doc, "LINE_CHANNEL_ACCESS_TOKENとLINE_CHANNEL_SECRETは、この公式アカウントへ接続された同一Messaging APIチャネルの値を使用する。対応関係は実装・本番設定時にLINE Developersで確認する。")
 
     add_heading(doc, "3. 業務フロー・ユースケース", 1)
@@ -1146,7 +1146,7 @@ def build_document() -> None:
     release_num_id = create_decimal_numbering(doc)
     add_number(doc, release_num_id, "本番DBバックアップと復元確認を行う。")
     add_number(doc, release_num_id, "新規テーブル・列・制約をマイグレーションし、既存LINE宛先はguardian_contact_id=NULLで保持する。")
-    add_number(doc, release_num_id, "メール配信、LINE_BASIC_ID=@408mrkbk、token pepper等の環境変数を登録する。Secret値はSecret Manager等で管理する。")
+    add_number(doc, release_num_id, "メール配信、LINE_BASIC_ID=@785ntzvy、token pepper等の環境変数を登録する。Secret値はSecret Manager等で管理する。")
     add_number(doc, release_num_id, "バックエンドを先行リリースし、新APIをfeature flagで無効のまま疎通確認する。")
     add_number(doc, release_num_id, "フロントエンドをリリースし、管理者画面をテスト園だけ有効化する。")
     add_number(doc, release_num_id, "テスト用LINE／メールで連携・併送・再送・unfollowを確認する。")
@@ -1165,7 +1165,7 @@ def build_document() -> None:
         [
             ["LINE_CHANNEL_ACCESS_TOKEN", "Push送信", "現行。Secret"],
             ["LINE_CHANNEL_SECRET", "Webhook署名検証", "現行。Secret"],
-            ["LINE_BASIC_ID", "QR／トーク起動URL生成", "採用値：@408mrkbk。公開可能値だが設定管理"],
+            ["LINE_BASIC_ID", "QR／トーク起動URL生成", "採用値：@785ntzvy。公開可能値だが設定管理"],
             ["LINE_ORGANIZATION_ID", "単一園の暫定紐付け", "現行。複数園化時は廃止検討"],
             ["LINE_LINK_TOKEN_PEPPER", "token hash強化", "追加。Secret、ローテーション手順必要"],
             ["EMAIL_PROVIDER_API_KEY", "メール送信", "追加。Secret"],
@@ -1220,7 +1220,7 @@ def build_document() -> None:
         ["根拠", "確認内容"],
         [
             ["README.md（2026-07-26時点）", "LINEはAPI実装済み、画面操作・同意・再送・到達確認・実運用は未完成"],
-            ["園運用決定（2026-07-27）", "LINE公式アカウント「バナナ幼稚園」（LINE ID：@408mrkbk）を採用"],
+            ["園運用決定（2026-07-27）", "LINE公式アカウント「バナナ幼稚園」（LINE ID：@785ntzvy）を採用"],
             ["backend/main.py:35-37", "LINE_CHANNEL_ACCESS_TOKEN、LINE_CHANNEL_SECRET、LINE_ORGANIZATION_ID"],
             ["backend/main.py:139-162", "notification_queue、line_contactsの現行データモデル"],
             ["backend/main.py:920-980", "通知キュー、LINE Push、署名付きWebhook、宛先一覧API"],

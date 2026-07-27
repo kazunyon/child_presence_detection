@@ -37,7 +37,7 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_ORGANIZATION_ID = int(os.getenv("LINE_ORGANIZATION_ID", "0"))
-LINE_BASIC_ID = os.getenv("LINE_BASIC_ID", "@408mrkbk")
+LINE_BASIC_ID = os.getenv("LINE_BASIC_ID", "@785ntzvy")
 LINE_OFFICIAL_ACCOUNT_NAME = os.getenv("LINE_OFFICIAL_ACCOUNT_NAME", "バナナ幼稚園")
 LINE_LINK_TOKEN_PEPPER = os.getenv("LINE_LINK_TOKEN_PEPPER", JWT_SECRET)
 LINE_LINK_EXPIRE_HOURS = int(os.getenv("LINE_LINK_EXPIRE_HOURS", "24"))
@@ -425,7 +425,7 @@ def line_link_token_hash(raw_token: str) -> str:
 
 def line_talk_url(raw_token: str) -> str:
     basic_id = LINE_BASIC_ID if LINE_BASIC_ID.startswith("@") else f"@{LINE_BASIC_ID}"
-    return f"https://line.me/R/oaMessage/{basic_id}/?{quote(f'連携 {raw_token}', safe='')}"
+    return f"https://line.me/R/oaMessage/{quote(basic_id, safe='')}/?{quote(f'連携 {raw_token}', safe='')}"
 
 
 def qr_png_data_url(value: str) -> str:

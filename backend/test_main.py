@@ -538,8 +538,8 @@ class LineGuardianNotificationTest(unittest.TestCase):
             issued = main_module.issue_line_link_request_for_guardian(guardian, self.actor, self.db)
 
         self.assertEqual(issued["official_account_name"], "バナナ幼稚園")
-        self.assertEqual(issued["line_basic_id"], "@408mrkbk")
-        self.assertIn("/oaMessage/@408mrkbk/", issued["line_link_url"])
+        self.assertEqual(issued["line_basic_id"], "@785ntzvy")
+        self.assertIn("/oaMessage/%40785ntzvy/", issued["line_link_url"])
         self.assertTrue(issued["qr_png_data_url"].startswith("data:image/png;base64,"))
         request_row = self.db.get(main_module.LineLinkRequest, issued["request_id"])
         notification = self.db.get(main_module.NotificationQueue, request_row.email_notification_id)

@@ -56,7 +56,7 @@ GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名�
 | 管理者PINの緊急復旧 | 実装済み | 一時トークンを使い、固定初期PINへ戻さず安全に再設定 |
 | 動画証跡 | 一部実装 | 5〜30秒の車内撮影、アップロード、動画ID・保存キー・保存先パスの記録、記録詳細からの動画表示に対応 |
 | AI動画チェック | 土台のみ | AI補助要求と結果表示に対応。実際のAIプロバイダーは未接続のため、人による再確認を促す |
-| LINE・メール通知 | 実装済み（実運用確認前） | 保護者・園児・同意管理、バナナ幼稚園（@408mrkbk）QR連携、署名付きWebhook、降車時のLINE／メール併送、履歴・個別再送UI |
+| LINE・メール通知 | 実装済み（実運用確認前） | 保護者・園児・同意管理、バナナ幼稚園（@785ntzvy）QR連携、署名付きWebhook、降車時のLINE／メール併送、履歴・個別再送UI |
 | PDF・CSV出力 | 未実装 | 記録帳票の出力は今後 |
 | 未確認アラーム | 未実装 | 時間超過時の警告・管理者通知は今後 |
 
@@ -128,7 +128,7 @@ GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名�
 ### 6. 通知・動画・AI連携の土台
 
 - 保護者のメールアドレス、対象園児、通知同意、LINE希望を管理する
-- 「バナナ幼稚園」（`@408mrkbk`）への期限付き・一回限りのQR連携案内をメール送信する
+- 「バナナ幼稚園」（`@785ntzvy`）への期限付き・一回限りのQR連携案内をメール送信する
 - 署名付きLINE Webhookで連携トークンを照合し、保護者とLINEユーザーIDを紐付ける
 - 降車記録を保護者単位で冪等化し、LINEとメールへ別キューで併送する
 - LINE／メールの送信結果、再送回数、失敗理由を記録し、管理画面から個別再送する
@@ -233,7 +233,7 @@ uvicorn main:app --reload --port 8000
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging APIのアクセストークン |
 | `LINE_CHANNEL_SECRET` | LINE Webhook署名検証用Secret |
 | `LINE_ORGANIZATION_ID` | LINE連携の対象となる園ID |
-| `LINE_BASIC_ID` | 採用するLINE公式アカウントのBasic ID。バナナ幼稚園は `@408mrkbk` |
+| `LINE_BASIC_ID` | 採用するLINE公式アカウントのBasic ID。バナナ幼稚園は `@785ntzvy` |
 | `LINE_OFFICIAL_ACCOUNT_NAME` | 画面・メールへ表示する公式アカウント名 |
 | `LINE_LINK_TOKEN_PEPPER` | QR連携トークンのハッシュを強化するSecret |
 | `LINE_LINK_EXPIRE_HOURS` | QR連携案内の有効時間。既定は24時間 |
@@ -261,11 +261,11 @@ Render本番で動画を再デプロイ後も残す場合は、`UPLOAD_DIR` をR
 
 ## LINE・メール通知の設定
 
-採用するLINE公式アカウントは **バナナ幼稚園（`@408mrkbk`）** です。
+採用するLINE公式アカウントは **バナナ幼稚園（`@785ntzvy`）** です。
 
 1. LINE Developersで、バナナ幼稚園の公式アカウントに接続されたMessaging APIチャネルを確認します。
 2. Webhook URLを `https://<APIのURL>/api/integrations/line/webhook` に設定し、Webhookを有効化します。
-3. Renderへ `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_ORGANIZATION_ID`、`LINE_LINK_TOKEN_PEPPER` を登録します。`LINE_BASIC_ID` は `@408mrkbk` です。
+3. Renderへ `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_ORGANIZATION_ID`、`LINE_LINK_TOKEN_PEPPER` を登録します。`LINE_BASIC_ID` は `@785ntzvy` です。
 4. 選定したメール配信アダプターのURLを `EMAIL_WEBHOOK_URL`、送信元を `EMAIL_FROM_ADDRESS` へ設定します。Webhookには件名、本文、連携URL、QR画像Data URL等をJSONで送ります。
 5. 管理者が設定画面で保護者、メール、対象園児、通知同意、LINE希望を登録し、「QR案内を発行」を押します。
 6. 保護者がメールのQRまたはリンクを開き、LINEトークの「連携 <token>」を送信すると、署名・期限・未使用状態を検証して紐付けます。

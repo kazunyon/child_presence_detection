@@ -414,7 +414,7 @@ function GuardianNotificationSettings({children,guardians,notifications,preview,
   const statusClass=(status:string)=>status==='linked'?'bg-emerald-100 text-emerald-800':status==='pending'?'bg-amber-100 text-amber-900':status==='failed'||status==='error'?'bg-red-100 text-red-800':'bg-slate-100 text-slate-700'
   return <>
     <section className="card mt-4 p-4">
-      <div className="flex items-start justify-between gap-3"><div><h2 className="m-0 text-lg font-black">保護者・LINE通知</h2><p className="m-0 mt-1 text-xs text-slate-600">メールアドレスを登録し、「バナナ幼稚園」公式アカウントとQRで連携します。</p></div><a className="shrink-0 text-xs font-bold text-teal" href="https://page.line.biz/account/@408mrkbk" target="_blank" rel="noreferrer">@408mrkbk</a></div>
+      <div className="flex items-start justify-between gap-3"><div><h2 className="m-0 text-lg font-black">保護者・LINE通知</h2><p className="m-0 mt-1 text-xs text-slate-600">メールアドレスを登録し、「バナナ幼稚園」公式アカウントとQRで連携します。</p></div><a className="shrink-0 text-xs font-bold text-teal" href="https://page.line.biz/account/@785ntzvy" target="_blank" rel="noreferrer">@785ntzvy</a></div>
       <form className="mt-4 grid gap-2" onSubmit={event=>void submit(event)}>
         <div className="grid grid-cols-2 gap-2"><input className="min-w-0 border rounded-xl p-3" name="name" placeholder="保護者名"/><input className="min-w-0 border rounded-xl p-3" name="relationship" placeholder="続柄（母・父など）"/></div>
         <input className="border rounded-xl p-3" name="email" type="email" placeholder="メールアドレス" required/>
