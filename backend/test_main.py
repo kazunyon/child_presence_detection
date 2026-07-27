@@ -1,9 +1,15 @@
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -459,6 +465,160 @@ class VehicleVideoEvidenceTest(unittest.TestCase):
                     validate_video_duration(duration)
                 self.assertEqual(context.exception.status_code, 422)
 
+class LineGuardianNotificationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.db = sessionmaker(bind=self.engine)()
+        self.organization = Organization(name="バナナ幼稚園")
+        self.db.add(self.organization); self.db.flush()
+        self.actor = Staff(
+            organization_id=self.organization.id,
+            name="管理者", role="admin", password_hash=hash_pin("test-pin"),
+        )
+        self.child = Child(
+            organization_id=self.organization.id,
+            name="園児A", qr_token="child-a",
+        )
+        self.db.add_all([self.actor, self.child]); self.db.commit()
+
+    def tearDown(self) -> None:
+        self.db.close()
+        self.engine.dispose()
+
+    def create_guardian(self):
+        return main_module.create_guardian_contact(
+            main_module.GuardianContactIn(
+                name="保護者A", email=" Parent@Example.JP ", email_enabled=True,
+                line_enabled=True, consent=True, child_ids=[self.child.id], relationship="母",
+            ),
+            actor=self.actor, db=self.db,
+        )
+
+    def test_guardian_registration_normalizes_email_and_links_child(self) -> None:
+        result = self.create_guardian()
+        guardian = self.db.get(main_module.GuardianContact, result["id"])
+
+        self.assertEqual(guardian.email_normalized, "parent@example.jp")
+        self.assertTrue(guardian.consented_at)
+        self.assertEqual(result["children"][0]["id"], self.child.id)
+        self.assertEqual(result["line_status"], "not_requested")
+
+    def test_line_requires_email_channel_and_consent_can_be_withdrawn(self) -> None:
+        with self.assertRaises(HTTPException) as context:
+            main_module.create_guardian_contact(
+                main_module.GuardianContactIn(
+                    email="parent@example.jp", email_enabled=False, line_enabled=True,
+                    consent=True, child_ids=[self.child.id],
+                ), actor=self.actor, db=self.db,
+            )
+        self.assertEqual(context.exception.status_code, 422)
+        self.db.rollback()
+
+        result = self.create_guardian()
+        updated = main_module.update_guardian_contact(
+            result["id"], main_module.GuardianContactUpdate(consent=False),
+            actor=self.actor, db=self.db,
+        )
+        self.assertIsNone(updated["consented_at"])
+        self.assertFalse(updated["email_enabled"])
+        self.assertFalse(updated["line_enabled"])
+        self.assertEqual(updated["line_status"], "revoked")
+    def test_line_link_issue_returns_banana_account_qr_without_storing_raw_link(self) -> None:
+        result = self.create_guardian()
+        guardian = self.db.get(main_module.GuardianContact, result["id"])
+
+        class FakeResponse:
+            status = 202
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, _limit): return b'{"message_id":"mail-1"}'
+
+        with patch.object(main_module, "EMAIL_WEBHOOK_URL", "https://mail.example.test/send"), patch.object(main_module, "urlopen", return_value=FakeResponse()):
+            issued = main_module.issue_line_link_request_for_guardian(guardian, self.actor, self.db)
+
+        self.assertEqual(issued["official_account_name"], "バナナ幼稚園")
+        self.assertEqual(issued["line_basic_id"], "@408mrkbk")
+        self.assertIn("/oaMessage/@408mrkbk/", issued["line_link_url"])
+        self.assertTrue(issued["qr_png_data_url"].startswith("data:image/png;base64,"))
+        request_row = self.db.get(main_module.LineLinkRequest, issued["request_id"])
+        notification = self.db.get(main_module.NotificationQueue, request_row.email_notification_id)
+        self.assertEqual(notification.status, "sent")
+        self.assertNotIn("line.me", notification.message)
+        self.assertEqual(len(request_row.token_hash), 64)
+
+    def test_signed_webhook_links_guardian_once(self) -> None:
+        result = self.create_guardian()
+        guardian = self.db.get(main_module.GuardianContact, result["id"])
+        guardian.line_status = "pending"
+        request_row = main_module.LineLinkRequest(
+            organization_id=self.organization.id,
+            guardian_contact_id=guardian.id,
+            token_hash=main_module.line_link_token_hash("known-token"),
+            expires_at=main_module.utc_now() + main_module.timedelta(hours=1),
+            requested_by=self.actor.id,
+        )
+        self.db.add(request_row); self.db.commit()
+        payload = {"events": [{
+            "type": "message", "webhookEventId": "evt-1", "replyToken": "reply-1",
+            "source": {"userId": "U123"},
+            "message": {"type": "text", "text": "連携 known-token"},
+        }]}
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        secret = "line-secret"
+        signature = base64.b64encode(hmac.new(secret.encode(), body, hashlib.sha256).digest()).decode()
+        delivered = False
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        request = Request({"type": "http", "method": "POST", "path": "/api/integrations/line/webhook", "headers": [(b"x-line-signature", signature.encode())]}, receive)
+
+        with patch.object(main_module, "LINE_CHANNEL_SECRET", secret), patch.object(main_module, "LINE_ORGANIZATION_ID", self.organization.id), patch.object(main_module, "LINE_CHANNEL_ACCESS_TOKEN", None):
+            asyncio.run(main_module.line_webhook(request, self.db))
+
+        self.db.refresh(guardian); self.db.refresh(request_row)
+        contact = self.db.query(main_module.LineContact).filter_by(line_user_id="U123").one()
+        self.assertEqual(guardian.line_status, "linked")
+        self.assertEqual(request_row.status, "used")
+        self.assertEqual(contact.guardian_contact_id, guardian.id)
+        self.assertEqual(self.db.query(main_module.LineContact).count(), 1)
+
+    def test_alighted_event_creates_line_and_email_once(self) -> None:
+        result = self.create_guardian()
+        guardian = self.db.get(main_module.GuardianContact, result["id"])
+        guardian.line_status = "linked"
+        self.db.add(main_module.LineContact(
+            organization_id=self.organization.id,
+            guardian_contact_id=guardian.id,
+            line_user_id="U123", is_active=True,
+        ))
+        trip = BusTrip(
+            organization_id=self.organization.id, direction="帰り", status="運行中",
+            started_at=datetime.now(timezone.utc),
+        )
+        self.db.add(trip); self.db.flush()
+        self.db.add(TripAttendance(
+            trip_id=trip.id, child_id=self.child.id,
+            boarded_at=datetime.now(timezone.utc), alighted_at=datetime.now(timezone.utc),
+        )); self.db.commit()
+
+        with patch.object(main_module, "NOTIFICATION_FEATURE_ENABLED", False):
+            first = main_module.queue_alighted_notifications(
+                self.db, self.organization.id, trip.id, self.child,
+                datetime.now(timezone.utc), self.actor,
+            )
+            second = main_module.queue_alighted_notifications(
+                self.db, self.organization.id, trip.id, self.child,
+                datetime.now(timezone.utc), self.actor,
+            )
+            self.db.commit()
+
+        self.assertEqual({item.channel for item in first}, {"line", "email"})
+        self.assertEqual(second, [])
+        self.assertEqual(self.db.query(main_module.NotificationQueue).count(), 2)
 if __name__ == "__main__":
     unittest.main()
 

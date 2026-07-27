@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from hashlib import pbkdf2_hmac, sha256
+from io import BytesIO
 import base64
 import hmac
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 import secrets
 from typing import Generator, Literal
 from urllib.error import URLError
+from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -35,6 +37,13 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_ORGANIZATION_ID = int(os.getenv("LINE_ORGANIZATION_ID", "0"))
+LINE_BASIC_ID = os.getenv("LINE_BASIC_ID", "@408mrkbk")
+LINE_OFFICIAL_ACCOUNT_NAME = os.getenv("LINE_OFFICIAL_ACCOUNT_NAME", "バナナ幼稚園")
+LINE_LINK_TOKEN_PEPPER = os.getenv("LINE_LINK_TOKEN_PEPPER", JWT_SECRET)
+LINE_LINK_EXPIRE_HOURS = int(os.getenv("LINE_LINK_EXPIRE_HOURS", "24"))
+EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL") or os.getenv("NOTIFICATION_WEBHOOK_URL")
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS")
+NOTIFICATION_FEATURE_ENABLED = os.getenv("NOTIFICATION_FEATURE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 security = HTTPBearer()
 
 
@@ -136,15 +145,70 @@ class VehicleSafetyCheck(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-class NotificationQueue(Base):
-    __tablename__ = "notification_queue"
+class GuardianContact(Base):
+    __tablename__ = "guardian_contacts"
+    __table_args__ = (UniqueConstraint("organization_id", "email_normalized", name="uq_guardian_contact_org_email"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    email: Mapped[str] = mapped_column(String(254))
+    email_normalized: Mapped[str] = mapped_column(String(254))
+    email_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    line_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    line_status: Mapped[str] = mapped_column(String(30), default="not_requested")
+    consented_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    consented_by: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class ChildGuardian(Base):
+    __tablename__ = "child_guardians"
+    __table_args__ = (UniqueConstraint("organization_id", "child_id", "guardian_contact_id", name="uq_child_guardian"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"), index=True)
+    guardian_contact_id: Mapped[int] = mapped_column(ForeignKey("guardian_contacts.id"), index=True)
+    relationship: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    notify_alighted: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class LineLinkRequest(Base):
+    __tablename__ = "line_link_requests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    guardian_contact_id: Mapped[int] = mapped_column(ForeignKey("guardian_contacts.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    requested_by: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    email_notification_id: Mapped[int | None] = mapped_column(ForeignKey("notification_queue.id"), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class NotificationQueue(Base):
+    __tablename__ = "notification_queue"
+    __table_args__ = (UniqueConstraint("event_key", "guardian_contact_id", "channel", name="uq_notification_event_guardian_channel"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    guardian_contact_id: Mapped[int | None] = mapped_column(ForeignKey("guardian_contacts.id"), nullable=True, index=True)
+    child_id: Mapped[int | None] = mapped_column(ForeignKey("children.id"), nullable=True, index=True)
     recipient_type: Mapped[str] = mapped_column(String(30))
     recipient: Mapped[str] = mapped_column(String(200))
     message: Mapped[str] = mapped_column(String(500))
     channel: Mapped[str] = mapped_column(String(30), default="webhook")
+    event_key: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    template_key: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    subject: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    provider_message_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
     provider_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -155,11 +219,15 @@ class LineContact(Base):
     __table_args__ = (UniqueConstraint("organization_id", "line_user_id", name="uq_line_contact_org_user"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), index=True)
+    guardian_contact_id: Mapped[int | None] = mapped_column(ForeignKey("guardian_contacts.id"), nullable=True, index=True)
     line_user_id: Mapped[str] = mapped_column(String(100))
     display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_webhook_event_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -266,6 +334,32 @@ class NotificationIn(BaseModel):
     recipient: str
     message: str = Field(max_length=500)
     channel: Literal["line", "webhook", "email", "sms", "push"] = "line"
+class GuardianContactIn(BaseModel):
+    name: str | None = Field(default=None, max_length=100)
+    email: str = Field(min_length=3, max_length=254)
+    email_enabled: bool = True
+    line_enabled: bool = False
+    consent: bool = False
+    child_ids: list[int] = Field(default_factory=list)
+    relationship: str | None = Field(default=None, max_length=50)
+    notify_alighted: bool = True
+
+class GuardianContactUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=100)
+    email: str | None = Field(default=None, min_length=3, max_length=254)
+    email_enabled: bool | None = None
+    line_enabled: bool | None = None
+    consent: bool | None = None
+    child_ids: list[int] | None = None
+    relationship: str | None = Field(default=None, max_length=50)
+    notify_alighted: bool | None = None
+    is_active: bool | None = None
+
+class NotificationEventIn(BaseModel):
+    trip_id: int
+    child_id: int
+    event_type: Literal["child.alighted"] = "child.alighted"
+    occurred_at: datetime | None = None
 class ThirdApprovalIn(BaseModel):
     staff_id: int
     pin: str = Field(min_length=4, max_length=128)
@@ -308,8 +402,93 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def audit(db: Session, actor: Staff | None, action: str, resource_type: str, resource_id: int | str, detail: dict | None = None) -> None:
-    db.add(AuditLog(organization_id=actor.organization_id if actor else 0, actor_id=actor.id if actor else None, action=action, resource_type=resource_type, resource_id=str(resource_id), detail=json.dumps(detail or {}, ensure_ascii=False)))
+def audit(db: Session, actor: Staff | None, action: str, resource_type: str, resource_id: int | str, detail: dict | None = None, organization_id: int | None = None) -> None:
+    db.add(AuditLog(organization_id=actor.organization_id if actor else int(organization_id or 0), actor_id=actor.id if actor else None, action=action, resource_type=resource_type, resource_id=str(resource_id), detail=json.dumps(detail or {}, ensure_ascii=False)))
+
+
+def utc_now() -> datetime:
+    """Return naive UTC for the existing timezone-neutral DateTime columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def normalize_email(value: str) -> str:
+    normalized = value.strip().lower()
+    local, separator, domain = normalized.rpartition("@")
+    if not separator or not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "メールアドレスの形式を確認してください")
+    return normalized
+
+
+def line_link_token_hash(raw_token: str) -> str:
+    return sha256(f"{raw_token}:{LINE_LINK_TOKEN_PEPPER}".encode()).hexdigest()
+
+
+def line_talk_url(raw_token: str) -> str:
+    basic_id = LINE_BASIC_ID if LINE_BASIC_ID.startswith("@") else f"@{LINE_BASIC_ID}"
+    return f"https://line.me/R/oaMessage/{basic_id}/?{quote(f'連携 {raw_token}', safe='')}"
+
+
+def qr_png_data_url(value: str) -> str:
+    try:
+        import qrcode
+    except ImportError as exc:
+        raise RuntimeError("QR生成ライブラリが未導入です") from exc
+    image = qrcode.make(value)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode()
+
+
+def guardian_public(db: Session, item: GuardianContact) -> dict:
+    links = db.query(ChildGuardian, Child).join(Child, Child.id == ChildGuardian.child_id).filter(
+        ChildGuardian.guardian_contact_id == item.id,
+        ChildGuardian.organization_id == item.organization_id,
+    ).order_by(Child.name).all()
+    line_contact = db.query(LineContact).filter_by(
+        organization_id=item.organization_id,
+        guardian_contact_id=item.id,
+        is_active=True,
+    ).first()
+    return {
+        "id": item.id,
+        "name": item.name,
+        "email": item.email,
+        "email_enabled": item.email_enabled,
+        "line_enabled": item.line_enabled,
+        "line_status": item.line_status,
+        "consented_at": item.consented_at,
+        "is_active": item.is_active,
+        "children": [{
+            "id": child.id,
+            "name": child.name,
+            "relationship": link.relationship,
+            "notify_alighted": link.notify_alighted,
+        } for link, child in links],
+        "line_contact_active": bool(line_contact),
+    }
+
+
+def replace_guardian_children(db: Session, actor: Staff, guardian: GuardianContact, child_ids: list[int], relationship: str | None, notify_alighted: bool) -> None:
+    wanted = list(dict.fromkeys(child_ids))
+    valid = {child.id for child in db.query(Child).filter(
+        Child.organization_id == actor.organization_id,
+        Child.id.in_(wanted),
+    ).all()} if wanted else set()
+    if valid != set(wanted):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "園児が見つかりません")
+    db.query(ChildGuardian).filter_by(
+        organization_id=actor.organization_id,
+        guardian_contact_id=guardian.id,
+    ).delete()
+    db.add_all([
+        ChildGuardian(
+            organization_id=actor.organization_id,
+            child_id=child_id,
+            guardian_contact_id=guardian.id,
+            relationship=relationship,
+            notify_alighted=notify_alighted,
+        ) for child_id in wanted
+    ])
 
 
 def current_staff(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> Staff:
@@ -384,6 +563,8 @@ def scan_trip(db: Session, actor: Staff, trip_id: int, qr_token: str, event_type
             raise HTTPException(status.HTTP_409_CONFLICT, "この園児はすでに降車済みです")
         attendance.alighted_at, attendance.alighted_by = now, actor.name
     audit(db, actor, f"trip.{event_type}", "trip", trip.id, {"child_id": child.id})
+    if event_type == "降車":
+        queue_alighted_notifications(db, actor.organization_id, trip.id, child, now, actor)
     return {"child": child.name, "event_type": event_type, "trip_id": trip.id}
 
 
@@ -450,7 +631,16 @@ def migrate_legacy_database() -> None:
         "children": {"organization_id": "INTEGER"},
         "bus_trips": {"organization_id": "INTEGER"},
         "vehicle_safety_checks": {"organization_id": "INTEGER", "trip_id": "INTEGER"},
-        "notification_queue": {"organization_id": "INTEGER", "channel": "VARCHAR(30) DEFAULT 'webhook'", "provider_response": "TEXT", "sent_at": "TIMESTAMP"},
+        "notification_queue": {
+            "organization_id": "INTEGER", "guardian_contact_id": "INTEGER", "child_id": "INTEGER",
+            "channel": "VARCHAR(30) DEFAULT 'webhook'", "event_key": "VARCHAR(160)",
+            "template_key": "VARCHAR(60)", "subject": "VARCHAR(200)", "attempt_count": "INTEGER DEFAULT 0",
+            "next_attempt_at": "TIMESTAMP", "provider_message_id": "VARCHAR(200)", "error_code": "VARCHAR(60)",
+            "provider_response": "TEXT", "sent_at": "TIMESTAMP",
+        },
+        "line_contacts": {
+            "guardian_contact_id": "INTEGER", "last_webhook_event_id": "VARCHAR(160)", "last_event_at": "TIMESTAMP",
+        },
     }
     tables = set(inspect(engine).get_table_names())
     with engine.begin() as connection:
@@ -470,6 +660,8 @@ def migrate_legacy_database() -> None:
         for table in ("staff", "vehicles", "bus_routes", "children", "bus_trips", "vehicle_safety_checks", "notification_queue"):
             if table in tables:
                 connection.execute(text(f"UPDATE {table} SET organization_id = :org_id WHERE organization_id IS NULL"), {"org_id": org_id})
+        if "notification_queue" in tables:
+            connection.execute(text("UPDATE notification_queue SET attempt_count = 0 WHERE attempt_count IS NULL"))
 
     with SessionLocal() as db:
         # Legacy installations used SHA-256 PIN hashes. Convert the shipped staff
@@ -811,6 +1003,8 @@ def manual_trip_attendance(trip_id: int, data: ManualAttendanceIn, actor: Staff 
             raise HTTPException(status.HTTP_409_CONFLICT, "この園児はすでに降車済みです")
         attendance.alighted_at, attendance.alighted_by = now, f"{actor.name}（QRなし）"
     audit(db, actor, f"trip.manual_{data.event_type}", "trip", trip.id, {"child_id": child.id, "child_name": child.name, "reason": "qr_unavailable"})
+    if data.event_type == "降車":
+        queue_alighted_notifications(db, actor.organization_id, trip.id, child, now, actor)
     db.commit()
     return trip_summary(db, trip)
 @app.post("/api/trips/{trip_id}/cancel")
@@ -917,12 +1111,283 @@ def vehicle_check(data: VehicleCheckIn, actor: Staff = Depends(current_staff), d
     if data.trip_id: trip_for_org(db, data.trip_id, actor)
     item = VehicleSafetyCheck(organization_id=actor.organization_id, staff_id=actor.id, staff_name=actor.name, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "vehicle_check.create", "vehicle_check", item.id); db.commit(); return {"id": item.id, "recorded_at": item.created_at}
 
+def validate_guardian_settings(email: str, email_enabled: bool, line_enabled: bool, consent: bool) -> str:
+    normalized = normalize_email(email)
+    if (email_enabled or line_enabled) and not consent:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "通知同意を確認してください")
+    if line_enabled and (not normalized or not email_enabled):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "LINE通知を希望する場合はメール通知も有効にしてください")
+    return normalized
+
+
+@app.get("/api/guardian-contacts")
+def list_guardian_contacts(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> list[dict]:
+    items = db.query(GuardianContact).filter_by(organization_id=actor.organization_id).order_by(GuardianContact.created_at.desc()).all()
+    return [guardian_public(db, item) for item in items]
+
+
+@app.post("/api/guardian-contacts", status_code=status.HTTP_201_CREATED)
+def create_guardian_contact(data: GuardianContactIn, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    if not data.child_ids:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "対象園児を1人以上選択してください")
+    normalized = validate_guardian_settings(data.email, data.email_enabled, data.line_enabled, data.consent)
+    if db.query(GuardianContact).filter_by(organization_id=actor.organization_id, email_normalized=normalized).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "このメールアドレスは登録済みです")
+    item = GuardianContact(
+        organization_id=actor.organization_id,
+        name=data.name.strip() if data.name else None,
+        email=data.email.strip(),
+        email_normalized=normalized,
+        email_enabled=data.email_enabled,
+        line_enabled=data.line_enabled,
+        line_status="not_requested",
+        consented_at=utc_now() if data.consent else None,
+        consented_by=actor.id if data.consent else None,
+    )
+    db.add(item)
+    db.flush()
+    replace_guardian_children(db, actor, item, data.child_ids, data.relationship, data.notify_alighted)
+    audit(db, actor, "guardian_contact.create", "guardian_contact", item.id, {
+        "child_ids": data.child_ids, "email_enabled": data.email_enabled,
+        "line_enabled": data.line_enabled, "consent": data.consent,
+    })
+    db.commit()
+    return guardian_public(db, item)
+
+
+@app.put("/api/guardian-contacts/{guardian_id}")
+def update_guardian_contact(guardian_id: int, data: GuardianContactUpdate, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    item = db.query(GuardianContact).filter_by(id=guardian_id, organization_id=actor.organization_id).first()
+    if not item:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "保護者連絡先が見つかりません")
+    values = data.model_dump(exclude_unset=True)
+    email = values.get("email", item.email)
+    email_enabled = values.get("email_enabled", item.email_enabled)
+    line_enabled = values.get("line_enabled", item.line_enabled)
+    consent = values.get("consent", item.consented_at is not None)
+    if consent:
+        normalized = validate_guardian_settings(email, email_enabled, line_enabled, consent)
+    else:
+        normalized = normalize_email(email)
+        email_enabled, line_enabled = False, False
+    duplicate = db.query(GuardianContact).filter(
+        GuardianContact.organization_id == actor.organization_id,
+        GuardianContact.email_normalized == normalized,
+        GuardianContact.id != item.id,
+    ).first()
+    if duplicate:
+        raise HTTPException(status.HTTP_409_CONFLICT, "このメールアドレスは登録済みです")
+    if "name" in values:
+        item.name = values["name"].strip() if values["name"] else None
+    if "email" in values:
+        item.email, item.email_normalized = email.strip(), normalized
+    item.email_enabled, item.line_enabled = email_enabled, line_enabled
+    if "is_active" in values:
+        item.is_active = values["is_active"]
+    if consent:
+        if not item.consented_at:
+            item.consented_at, item.consented_by = utc_now(), actor.id
+    else:
+        item.consented_at, item.consented_by = None, None
+        item.email_enabled, item.line_enabled = False, False
+        item.line_status = "revoked"
+        db.query(LineLinkRequest).filter_by(organization_id=actor.organization_id, guardian_contact_id=item.id, status="pending").update({"status": "revoked"})
+        db.query(LineContact).filter_by(organization_id=actor.organization_id, guardian_contact_id=item.id).update({"guardian_contact_id": None})
+    if values.get("line_enabled") is False and item.line_status == "linked":
+        item.line_status = "revoked"
+        db.query(LineContact).filter_by(organization_id=actor.organization_id, guardian_contact_id=item.id).update({"guardian_contact_id": None})
+    if "child_ids" in values:
+        if not values["child_ids"]:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "対象園児を1人以上選択してください")
+        replace_guardian_children(
+            db, actor, item, values["child_ids"], values.get("relationship"),
+            values.get("notify_alighted", True),
+        )
+    elif "relationship" in values or "notify_alighted" in values:
+        links = db.query(ChildGuardian).filter_by(organization_id=actor.organization_id, guardian_contact_id=item.id).all()
+        for link in links:
+            if "relationship" in values:
+                link.relationship = values["relationship"]
+            if "notify_alighted" in values:
+                link.notify_alighted = values["notify_alighted"]
+    item.updated_at = utc_now()
+    audit(db, actor, "guardian_contact.update", "guardian_contact", item.id, {
+        key: value for key, value in values.items() if key != "email"
+    })
+    db.commit()
+    return guardian_public(db, item)
+
+
+def dispatch_webhook_payload(item: NotificationQueue, payload_override: dict | None = None) -> tuple[str, str | None]:
+    url = EMAIL_WEBHOOK_URL if item.channel == "email" else os.getenv("NOTIFICATION_WEBHOOK_URL")
+    if not url:
+        setting = "EMAIL_WEBHOOK_URL" if item.channel == "email" else "NOTIFICATION_WEBHOOK_URL"
+        raise RuntimeError(f"{setting} が未設定です")
+    payload = {
+        "recipient": item.recipient, "message": item.message, "channel": item.channel,
+        "subject": item.subject, "from": EMAIL_FROM_ADDRESS,
+    }
+    if payload_override:
+        payload.update(payload_override)
+    request = UrlRequest(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(request, timeout=10) as response:
+        response_body = response.read(4096).decode("utf-8", errors="replace")
+        provider_id = None
+        if response_body:
+            try:
+                parsed = json.loads(response_body)
+                provider_id = str(parsed.get("id") or parsed.get("message_id") or "") or None
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return f"HTTP {response.status}", provider_id
+
+
+def dispatch_queue_item(item: NotificationQueue, payload_override: dict | None = None) -> str:
+    item.attempt_count = int(item.attempt_count or 0) + 1
+    item.status = "sending"
+    try:
+        if item.channel == "line":
+            item.provider_response = dispatch_line(item)
+        else:
+            item.provider_response, item.provider_message_id = dispatch_webhook_payload(item, payload_override)
+        item.status, item.sent_at = "sent", utc_now()
+        item.error_code, item.next_attempt_at = None, None
+    except (URLError, OSError, RuntimeError) as exc:
+        item.status, item.provider_response = "failed", str(exc)[:1000]
+        item.error_code = "configuration" if isinstance(exc, RuntimeError) else "transport"
+        retry_minutes = (1, 5, 30)
+        item.next_attempt_at = utc_now() + timedelta(minutes=retry_minutes[min(item.attempt_count - 1, 2)]) if item.attempt_count < 3 else None
+    return item.status
+
+
+def issue_line_link_request_for_guardian(guardian: GuardianContact, actor: Staff, db: Session) -> dict:
+    if not guardian.is_active or not guardian.line_enabled:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "LINE通知を有効にしてください")
+    if not guardian.consented_at:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "通知同意を確認してください")
+    normalize_email(guardian.email)
+    db.query(LineLinkRequest).filter_by(
+        organization_id=actor.organization_id,
+        guardian_contact_id=guardian.id,
+        status="pending",
+    ).update({"status": "revoked"})
+    raw_token = secrets.token_urlsafe(32)
+    expires_at = utc_now() + timedelta(hours=LINE_LINK_EXPIRE_HOURS)
+    link_request = LineLinkRequest(
+        organization_id=actor.organization_id,
+        guardian_contact_id=guardian.id,
+        token_hash=line_link_token_hash(raw_token),
+        expires_at=expires_at,
+        requested_by=actor.id,
+    )
+    db.add(link_request)
+    db.flush()
+    talk_url = line_talk_url(raw_token)
+    qr_data_url = qr_png_data_url(talk_url)
+    email_item = NotificationQueue(
+        organization_id=actor.organization_id,
+        guardian_contact_id=guardian.id,
+        recipient_type="guardian",
+        recipient=guardian.email,
+        message=f"{LINE_OFFICIAL_ACCOUNT_NAME}のLINE通知連携案内を送信しました。期限は{LINE_LINK_EXPIRE_HOURS}時間です。",
+        channel="email",
+        event_key=f"line-link:{link_request.id}",
+        template_key="line.link.v1",
+        subject=f"【まもるバス】{LINE_OFFICIAL_ACCOUNT_NAME}のLINE通知連携をお願いします",
+    )
+    db.add(email_item)
+    db.flush()
+    link_request.email_notification_id = email_item.id
+    guardian.line_status, guardian.updated_at = "pending", utc_now()
+    dispatch_queue_item(email_item, {
+        "template_key": "line.link.v1",
+        "guardian_name": guardian.name or "保護者",
+        "official_account_name": LINE_OFFICIAL_ACCOUNT_NAME,
+        "line_basic_id": LINE_BASIC_ID,
+        "link_url": talk_url,
+        "qr_png_data_url": qr_data_url,
+        "expires_at": expires_at.isoformat() + "Z",
+    })
+    audit(db, actor, "line.link.request.issue", "line_link_request", link_request.id, {
+        "guardian_contact_id": guardian.id,
+        "expires_at": expires_at.isoformat(),
+        "email_notification_id": email_item.id,
+        "email_status": email_item.status,
+    })
+    db.commit()
+    return {
+        "request_id": link_request.id,
+        "status": link_request.status,
+        "expires_at": expires_at,
+        "email_delivery_status": email_item.status,
+        "official_account_name": LINE_OFFICIAL_ACCOUNT_NAME,
+        "line_basic_id": LINE_BASIC_ID,
+        "line_link_url": talk_url,
+        "qr_png_data_url": qr_data_url,
+    }
+
+
+@app.post("/api/guardian-contacts/{guardian_id}/line-link-requests", status_code=status.HTTP_202_ACCEPTED)
+def issue_line_link_request(guardian_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    guardian = db.query(GuardianContact).filter_by(id=guardian_id, organization_id=actor.organization_id).first()
+    if not guardian:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "保護者連絡先が見つかりません")
+    return issue_line_link_request_for_guardian(guardian, actor, db)
+
+
+@app.get("/api/guardian-contacts/{guardian_id}/line-link-status")
+def line_link_status(guardian_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    guardian = db.query(GuardianContact).filter_by(id=guardian_id, organization_id=actor.organization_id).first()
+    if not guardian:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "保護者連絡先が見つかりません")
+    latest = db.query(LineLinkRequest).filter_by(organization_id=actor.organization_id, guardian_contact_id=guardian.id).order_by(LineLinkRequest.created_at.desc()).first()
+    return {
+        "guardian_contact_id": guardian.id,
+        "line_status": guardian.line_status,
+        "request_status": latest.status if latest else None,
+        "expires_at": latest.expires_at if latest else None,
+    }
+
+
+@app.delete("/api/guardian-contacts/{guardian_id}/line-link")
+def unlink_guardian_line(guardian_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    guardian = db.query(GuardianContact).filter_by(id=guardian_id, organization_id=actor.organization_id).first()
+    if not guardian:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "保護者連絡先が見つかりません")
+    db.query(LineContact).filter_by(organization_id=actor.organization_id, guardian_contact_id=guardian.id).update({"guardian_contact_id": None})
+    db.query(LineLinkRequest).filter_by(organization_id=actor.organization_id, guardian_contact_id=guardian.id, status="pending").update({"status": "revoked"})
+    guardian.line_status, guardian.updated_at = "revoked", utc_now()
+    audit(db, actor, "line.contact.unlink", "guardian_contact", guardian.id)
+    db.commit()
+    return {"guardian_contact_id": guardian.id, "line_status": guardian.line_status}
+
 @app.post("/api/notifications", status_code=status.HTTP_201_CREATED)
 def queue_notification(data: NotificationIn, actor: Staff = Depends(require_roles("admin", "operator")), db: Session = Depends(get_db)):
-    item = NotificationQueue(organization_id=actor.organization_id, **data.model_dump()); db.add(item); db.flush(); audit(db, actor, "notification.queue", "notification", item.id); db.commit(); return {"id": item.id, "status": item.status}
+    item = NotificationQueue(organization_id=actor.organization_id, **data.model_dump())
+    db.add(item); db.flush(); audit(db, actor, "notification.queue", "notification", item.id); db.commit()
+    return {"id": item.id, "status": item.status}
+
+
+def notification_public(db: Session, item: NotificationQueue) -> dict:
+    guardian = db.get(GuardianContact, item.guardian_contact_id) if item.guardian_contact_id else None
+    return {
+        "id": item.id, "guardian_contact_id": item.guardian_contact_id,
+        "guardian_name": guardian.name if guardian else None,
+        "child_id": item.child_id, "recipient": item.recipient,
+        "message": item.message, "subject": item.subject, "channel": item.channel,
+        "event_key": item.event_key, "template_key": item.template_key,
+        "status": item.status, "attempt_count": item.attempt_count,
+        "next_attempt_at": item.next_attempt_at, "provider_response": item.provider_response,
+        "error_code": item.error_code, "created_at": item.created_at, "sent_at": item.sent_at,
+    }
+
+
 @app.get("/api/notifications")
-def list_notifications(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    return db.query(NotificationQueue).filter_by(organization_id=actor.organization_id).order_by(NotificationQueue.created_at.desc()).limit(100).all()
+def list_notifications(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> list[dict]:
+    items = db.query(NotificationQueue).filter_by(organization_id=actor.organization_id).order_by(NotificationQueue.created_at.desc()).limit(100).all()
+    return [notification_public(db, item) for item in items]
+
+
 def dispatch_line(item: NotificationQueue) -> str:
     if not LINE_CHANNEL_ACCESS_TOKEN:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です")
@@ -936,22 +1401,108 @@ def dispatch_line(item: NotificationQueue) -> str:
     with urlopen(request, timeout=10) as response:
         return f"LINE HTTP {response.status}"
 
-@app.post("/api/notifications/{notification_id}/dispatch")
-def dispatch_notification(notification_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):
-    item = db.query(NotificationQueue).filter_by(id=notification_id, organization_id=actor.organization_id).first()
-    if not item: raise HTTPException(404, "通知が見つかりません")
+
+def dispatch_line_reply(reply_token: str, message: str) -> None:
+    if not LINE_CHANNEL_ACCESS_TOKEN or not reply_token:
+        return
+    request = UrlRequest(
+        "https://api.line.me/v2/bot/message/reply",
+        data=json.dumps({"replyToken": reply_token, "messages": [{"type": "text", "text": message}]}, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
+        method="POST",
+    )
     try:
-        if item.channel == "line":
-            item.provider_response = dispatch_line(item)
-        else:
-            url = os.getenv("NOTIFICATION_WEBHOOK_URL")
-            if not url: raise RuntimeError("NOTIFICATION_WEBHOOK_URL が未設定です")
-            request = UrlRequest(url, data=json.dumps({"recipient": item.recipient, "message": item.message, "channel": item.channel}).encode(), headers={"Content-Type": "application/json"}, method="POST")
-            with urlopen(request, timeout=10) as response: item.provider_response = f"HTTP {response.status}"
-        item.status, item.sent_at = "sent", datetime.now(timezone.utc)
-    except (URLError, OSError, RuntimeError) as exc:
-        item.status, item.provider_response = "failed", str(exc)[:1000]
-    audit(db, actor, "notification.dispatch", "notification", item.id, {"status": item.status, "channel": item.channel}); db.commit(); return {"id": item.id, "status": item.status}
+        with urlopen(request, timeout=10):
+            pass
+    except (URLError, OSError):
+        pass
+
+
+def queue_alighted_notifications(db: Session, organization_id: int, trip_id: int, child: Child, occurred_at: datetime, actor: Staff | None = None) -> list[NotificationQueue]:
+    value = occurred_at if occurred_at.tzinfo else occurred_at.replace(tzinfo=timezone.utc)
+    occurred_at_jst = value.astimezone(JST).strftime("%Y/%m/%d %H:%M")
+    event_key = f"org:{organization_id}:trip:{trip_id}:child:{child.id}:alighted"
+    message = f"まもるバスからのお知らせです。{child.name}さんの降車記録を{occurred_at_jst}に受け付けました。※本通知は記録のお知らせであり、安全確認の最終判断を代替するものではありません。"
+    subject = "【まもるバス】降車記録のお知らせ"
+    rows = db.query(ChildGuardian, GuardianContact).join(
+        GuardianContact, GuardianContact.id == ChildGuardian.guardian_contact_id,
+    ).filter(
+        ChildGuardian.organization_id == organization_id,
+        ChildGuardian.child_id == child.id,
+        ChildGuardian.notify_alighted.is_(True),
+        GuardianContact.organization_id == organization_id,
+        GuardianContact.is_active.is_(True),
+        GuardianContact.consented_at.is_not(None),
+    ).all()
+    created: list[NotificationQueue] = []
+    for link, guardian in rows:
+        channels: list[tuple[str, str]] = []
+        if guardian.email_enabled:
+            channels.append(("email", guardian.email))
+        if guardian.line_enabled and guardian.line_status == "linked":
+            line_contact = db.query(LineContact).filter_by(
+                organization_id=organization_id,
+                guardian_contact_id=guardian.id,
+                is_active=True,
+            ).first()
+            if line_contact:
+                channels.append(("line", line_contact.line_user_id))
+        for channel, recipient in channels:
+            existing = db.query(NotificationQueue).filter_by(
+                event_key=event_key, guardian_contact_id=guardian.id, channel=channel,
+            ).first()
+            if existing:
+                continue
+            item = NotificationQueue(
+                organization_id=organization_id,
+                guardian_contact_id=guardian.id,
+                child_id=child.id,
+                recipient_type="guardian",
+                recipient=recipient,
+                message=message,
+                subject=subject if channel == "email" else None,
+                channel=channel,
+                event_key=event_key,
+                template_key="child.alighted.v1",
+            )
+            db.add(item); db.flush(); created.append(item)
+            if NOTIFICATION_FEATURE_ENABLED:
+                dispatch_queue_item(item)
+    audit(db, actor, "notification.event.create", "trip", trip_id, {
+        "event_key": event_key, "child_id": child.id,
+        "created": len(created), "channels": [item.channel for item in created],
+    }, organization_id=organization_id)
+    return created
+
+
+@app.post("/api/notification-events", status_code=status.HTTP_201_CREATED)
+def create_notification_event(data: NotificationEventIn, actor: Staff = Depends(require_roles("admin", "operator")), db: Session = Depends(get_db)) -> dict:
+    trip = trip_for_org(db, data.trip_id, actor)
+    child = db.query(Child).filter_by(id=data.child_id, organization_id=actor.organization_id).first()
+    if not child or not db.query(TripAttendance).filter_by(trip_id=trip.id, child_id=child.id).first():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "園児または運行記録が見つかりません")
+    items = queue_alighted_notifications(db, actor.organization_id, trip.id, child, data.occurred_at or utc_now(), actor)
+    db.commit()
+    return {"event_key": f"org:{actor.organization_id}:trip:{trip.id}:child:{child.id}:alighted", "created": len(items), "notification_ids": [item.id for item in items]}
+
+
+@app.post("/api/notifications/{notification_id}/dispatch")
+@app.post("/api/notifications/{notification_id}/retry")
+def dispatch_notification(notification_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> dict:
+    item = db.query(NotificationQueue).filter_by(id=notification_id, organization_id=actor.organization_id).first()
+    if not item:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "通知が見つかりません")
+    if item.template_key == "line.link.v1":
+        raise HTTPException(status.HTTP_409_CONFLICT, "LINE連携案内は機密リンクを保存しないため、保護者画面から再発行してください")
+    if item.status == "sent":
+        raise HTTPException(status.HTTP_409_CONFLICT, "送信済み通知は再送できません")
+    dispatch_queue_item(item)
+    audit(db, actor, "notification.dispatch", "notification", item.id, {
+        "status": item.status, "channel": item.channel, "attempt_count": item.attempt_count,
+    })
+    db.commit()
+    return notification_public(db, item)
+
 
 @app.post("/api/integrations/line/webhook", status_code=status.HTTP_200_OK)
 async def line_webhook(request: Request, db: Session = Depends(get_db)) -> None:
@@ -962,18 +1513,68 @@ async def line_webhook(request: Request, db: Session = Depends(get_db)) -> None:
     expected = base64.b64encode(hmac.new(LINE_CHANNEL_SECRET.encode(), body, sha256).digest()).decode()
     if not hmac.compare_digest(signature, expected):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "LINE署名が不正です")
-    for event in json.loads(body.decode("utf-8")).get("events", []):
+    try:
+        events = json.loads(body.decode("utf-8")).get("events", [])
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "LINE Webhook JSONが不正です")
+    for event in events:
         user_id = event.get("source", {}).get("userId")
-        if not user_id: continue
+        if not user_id:
+            continue
+        webhook_event_id = event.get("webhookEventId")
         contact = db.query(LineContact).filter_by(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id).first()
-        if event.get("type") == "unfollow":
-            if contact: contact.is_active = False
+        if contact and webhook_event_id and contact.last_webhook_event_id == webhook_event_id:
             continue
         if not contact:
-            db.add(LineContact(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id))
-        else:
-            contact.is_active = True
+            contact = LineContact(organization_id=LINE_ORGANIZATION_ID, line_user_id=user_id)
+            db.add(contact); db.flush()
+        contact.last_webhook_event_id, contact.last_event_at = webhook_event_id, utc_now()
+        event_type = event.get("type")
+        if event_type == "unfollow":
+            contact.is_active = False
+            if contact.guardian_contact_id:
+                guardian = db.get(GuardianContact, contact.guardian_contact_id)
+                if guardian and guardian.organization_id == LINE_ORGANIZATION_ID:
+                    guardian.line_status, guardian.updated_at = "unfollowed", utc_now()
+            audit(db, None, "line.contact.unfollow", "line_contact", contact.id, organization_id=LINE_ORGANIZATION_ID)
+            continue
+        contact.is_active = True
+        if event_type != "message" or event.get("message", {}).get("type") != "text":
+            continue
+        text_message = event.get("message", {}).get("text", "").strip()
+        if not text_message.startswith("連携 "):
+            continue
+        raw_token = text_message[3:].strip()
+        link_request = db.query(LineLinkRequest).filter_by(token_hash=line_link_token_hash(raw_token)).first()
+        reply = "連携情報を確認できませんでした。園へQR案内の再発行をご依頼ください。"
+        if link_request and link_request.organization_id == LINE_ORGANIZATION_ID:
+            guardian = db.query(GuardianContact).filter_by(id=link_request.guardian_contact_id, organization_id=LINE_ORGANIZATION_ID).first()
+            if link_request.status == "pending" and link_request.expires_at < utc_now():
+                link_request.status = "expired"
+                if guardian:
+                    guardian.line_status, guardian.updated_at = "expired", utc_now()
+                reply = "連携期限が切れています。園へQR案内の再発行をご依頼ください。"
+            elif link_request.status == "pending" and guardian and guardian.is_active and guardian.line_enabled and guardian.consented_at:
+                existing = db.query(LineContact).filter(
+                    LineContact.organization_id == LINE_ORGANIZATION_ID,
+                    LineContact.guardian_contact_id == guardian.id,
+                    LineContact.id != contact.id,
+                ).first()
+                if existing:
+                    reply = "別のLINEアカウントが連携済みです。変更する場合は園へご連絡ください。"
+                elif contact.guardian_contact_id and contact.guardian_contact_id != guardian.id:
+                    reply = "このLINEアカウントは別の保護者連絡先に連携済みです。園へご連絡ください。"
+                else:
+                    contact.guardian_contact_id = guardian.id
+                    link_request.status, link_request.used_at = "used", utc_now()
+                    guardian.line_status, guardian.updated_at = "linked", utc_now()
+                    reply = f"{LINE_OFFICIAL_ACCOUNT_NAME}のLINE通知連携が完了しました。"
+                    audit(db, None, "line.contact.link", "guardian_contact", guardian.id, {
+                        "line_contact_id": contact.id, "line_link_request_id": link_request.id,
+                    }, organization_id=LINE_ORGANIZATION_ID)
+        dispatch_line_reply(event.get("replyToken", ""), reply)
     db.commit()
+
 
 @app.get("/api/integrations/line/contacts")
 def list_line_contacts(actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):

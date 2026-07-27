@@ -34,7 +34,7 @@
 
 GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名の例：`mamoru-bus-api`）へ認証済みリクエストを送ります。データはAPI側のデータベースへ保存されます。GitHub Pages単体ではFastAPIやデータベースは動作しません。
 
-## 2026年7月26日現在の実装状況
+## 2026年7月27日現在の実装状況
 
 | 機能 | 状況 | 内容 |
 |---|---|---|
@@ -56,7 +56,7 @@ GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名�
 | 管理者PINの緊急復旧 | 実装済み | 一時トークンを使い、固定初期PINへ戻さず安全に再設定 |
 | 動画証跡 | 一部実装 | 5〜30秒の車内撮影、アップロード、動画ID・保存キー・保存先パスの記録、記録詳細からの動画表示に対応 |
 | AI動画チェック | 土台のみ | AI補助要求と結果表示に対応。実際のAIプロバイダーは未接続のため、人による再確認を促す |
-| LINE通知 | API実装済み | 署名付きWebhook、宛先登録、Push送信。画面操作と実運用確認は今後 |
+| LINE・メール通知 | 実装済み（実運用確認前） | 保護者・園児・同意管理、バナナ幼稚園（@408mrkbk）QR連携、署名付きWebhook、降車時のLINE／メール併送、履歴・個別再送UI |
 | PDF・CSV出力 | 未実装 | 記録帳票の出力は今後 |
 | 未確認アラーム | 未実装 | 時間超過時の警告・管理者通知は今後 |
 
@@ -127,8 +127,11 @@ GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名�
 
 ### 6. 通知・動画・AI連携の土台
 
-- 通知をキューへ登録し、Webhookへ送信する
-- LINE Messaging APIへPush通知を送る
+- 保護者のメールアドレス、対象園児、通知同意、LINE希望を管理する
+- 「バナナ幼稚園」（`@408mrkbk`）への期限付き・一回限りのQR連携案内をメール送信する
+- 署名付きLINE Webhookで連携トークンを照合し、保護者とLINEユーザーIDを紐付ける
+- 降車記録を保護者単位で冪等化し、LINEとメールへ別キューで併送する
+- LINE／メールの送信結果、再送回数、失敗理由を記録し、管理画面から個別再送する
 - 送迎ごとの車内動画を5〜30秒で撮影し、動画証跡として保存する
 - 5秒経過後はSTOPでき、30秒で自動終了する
 - アップロード時に動画ID、元ファイル名、`storage_key`、保存先パス、形式、AI補助状態を記録する
@@ -230,6 +233,13 @@ uvicorn main:app --reload --port 8000
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging APIのアクセストークン |
 | `LINE_CHANNEL_SECRET` | LINE Webhook署名検証用Secret |
 | `LINE_ORGANIZATION_ID` | LINE連携の対象となる園ID |
+| `LINE_BASIC_ID` | 採用するLINE公式アカウントのBasic ID。バナナ幼稚園は `@408mrkbk` |
+| `LINE_OFFICIAL_ACCOUNT_NAME` | 画面・メールへ表示する公式アカウント名 |
+| `LINE_LINK_TOKEN_PEPPER` | QR連携トークンのハッシュを強化するSecret |
+| `LINE_LINK_EXPIRE_HOURS` | QR連携案内の有効時間。既定は24時間 |
+| `EMAIL_WEBHOOK_URL` | メール配信アダプターのWebhook URL |
+| `EMAIL_FROM_ADDRESS` | メール送信元 |
+| `NOTIFICATION_FEATURE_ENABLED` | 降車時の自動配信を有効化するフラグ |
 | `UPLOAD_DIR` | 動画ファイルの保存先。未指定時はバックエンドの `./uploads` |
 
 Render本番で動画を再デプロイ後も残す場合は、`UPLOAD_DIR` をRender Persistent Disk配下、またはS3/R2等のオブジェクトストレージ連携先に向ける必要があります。未指定のままRenderの通常ファイル領域に保存すると、再デプロイやインスタンス再作成で動画ファイルが消える可能性があります。
@@ -249,19 +259,20 @@ Render本番で動画を再デプロイ後も残す場合は、`UPLOAD_DIR` をR
 
 同じ復旧トークンはデータベース上でも一度しか使用できません。復旧操作は監査ログに `auth.admin_pin_recovery` として残ります。
 
-## LINE通知の設定
+## LINE・メール通知の設定
 
-LINE Messaging APIのPush通知を実装しています。
+採用するLINE公式アカウントは **バナナ幼稚園（`@408mrkbk`）** です。
 
-1. LINE Developersで、LINE公式アカウントに紐付くMessaging APIチャネルを作成します。
+1. LINE Developersで、バナナ幼稚園の公式アカウントに接続されたMessaging APIチャネルを確認します。
 2. Webhook URLを `https://<APIのURL>/api/integrations/line/webhook` に設定し、Webhookを有効化します。
-3. Renderへ `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_ORGANIZATION_ID` を登録します。
-4. 保護者または職員が公式アカウントを友だち追加すると、署名検証済みWebhookからLINEユーザーIDが登録されます。
-5. 管理者は `GET /api/integrations/line/contacts` で登録済みの宛先を確認できます。
-6. 通知をキューへ入れ、管理者が `POST /api/notifications/{id}/dispatch` を実行すると送信されます。
+3. Renderへ `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_ORGANIZATION_ID`、`LINE_LINK_TOKEN_PEPPER` を登録します。`LINE_BASIC_ID` は `@408mrkbk` です。
+4. 選定したメール配信アダプターのURLを `EMAIL_WEBHOOK_URL`、送信元を `EMAIL_FROM_ADDRESS` へ設定します。Webhookには件名、本文、連携URL、QR画像Data URL等をJSONで送ります。
+5. 管理者が設定画面で保護者、メール、対象園児、通知同意、LINE希望を登録し、「QR案内を発行」を押します。
+6. 保護者がメールのQRまたはリンクを開き、LINEトークの「連携 <token>」を送信すると、署名・期限・未使用状態を検証して紐付けます。
+7. 専用テスト用LINE・メールで連携、降車通知の併送、片側失敗、再送、友だち解除を確認します。
+8. 園責任者の承認後、`NOTIFICATION_FEATURE_ENABLED=true` にして降車時の自動配信を有効化します。
 
-LINE設定が未完了の場合、通知は送信済みにならず `failed` として記録されます。テスト時は実在する保護者へ送らず、専用のテスト用LINEアカウントを使用してください。
-
+連携トークンの平文はDBへ保存しません。案内メールの送信に失敗した場合、同じリンクを再送せず、管理画面から新しいQR案内を再発行します。LINE／メール設定が未完了の場合は `failed` として履歴へ残ります。実在する保護者へ送る前に必ずテストアカウントで確認してください。
 ## 現在できないこと・導入前の必須対応
 
 本アプリは開発途中です。園児の安否確認、事故防止の最終確認、法令上必要な記録にはまだ使用しないでください。必ず職員による目視確認と園の緊急対応手順を優先してください。
@@ -269,7 +280,7 @@ LINE設定が未完了の場合、通知は送信済みにならず `failed` と
 - 第三者確認は職員IDとPINによる確認であり、運転者本人との厳密な分離や強い本人確認は未完成
 - 車内撮影は5〜30秒で保存できるが、スマホ・ブラウザ・通信状態によってアップロード失敗や再撮影が必要になる場合がある
 - AIプロバイダー未接続のため、実際の子ども検出・動画判定は未実施
-- LINE通知の職員向け画面、再送、到達確認、同意・宛先管理の運用は未完成
+- LINE・メール通知のコードと管理画面は実装済みだが、LINE Developersの本番チャネル照合、メール配信事業者設定、実機・実回線・実運用試験は未実施
 - 動画は現在ファイル保存。本番では永続ディスクまたはS3/R2等のオブジェクトストレージ、暗号化、保存期限、削除手順、アクセス記録が必要
 - 多要素認証、トークン失効、通常のPIN変更、PDF・CSV出力、バックアップ・障害復旧は未実装
 - 本格的なDBマイグレーション、負荷試験、脆弱性診断、実園での運用評価は未実施
@@ -285,7 +296,7 @@ LINE設定が未完了の場合、通知は送信済みにならず `failed` と
 1. 動画保存先の永続化（Render Persistent DiskまたはS3/R2等）と保存期限・削除手順の運用
 2. 第三者承認の本人確認強化
 3. 未確認アラームと管理者通知
-4. LINE通知の画面操作、再送、到達確認、同意管理
+4. LINE／メール通知のテストアカウントによる結合・実機試験と園運用承認
 5. AI動画チェックの実プロバイダー接続
 6. PDF・CSV出力とバックアップ
 7. 動画の暗号化保存とアクセス記録

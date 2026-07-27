@@ -31,8 +31,22 @@ services:
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
+      - key: LINE_BASIC_ID
+        value: '@408mrkbk'
+      - key: LINE_OFFICIAL_ACCOUNT_NAME
+        value: バナナ幼稚園
+      - key: LINE_LINK_TOKEN_PEPPER
+        generateValue: true
+      - key: LINE_LINK_EXPIRE_HOURS
+        value: '24'
       - key: LINE_ORGANIZATION_ID
         sync: false
+      - key: EMAIL_WEBHOOK_URL
+        sync: false
+      - key: EMAIL_FROM_ADDRESS
+        sync: false
+      - key: NOTIFICATION_FEATURE_ENABLED
+        value: 'false'
 databases:
   - name: mamoru-bus-db
     plan: starter
