@@ -504,6 +504,21 @@ class LineGuardianNotificationTest(unittest.TestCase):
         self.assertEqual(result["children"][0]["id"], self.child.id)
         self.assertEqual(result["line_status"], "not_requested")
 
+    def test_duplicate_guardian_email_explains_sibling_edit_flow(self) -> None:
+        self.create_guardian()
+
+        with self.assertRaises(HTTPException) as context:
+            main_module.create_guardian_contact(
+                main_module.GuardianContactIn(
+                    name="別保護者", email="parent@example.jp", email_enabled=True,
+                    line_enabled=False, consent=True, child_ids=[self.child.id],
+                ),
+                actor=self.actor, db=self.db,
+            )
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(context.exception.detail, main_module.GUARDIAN_EMAIL_DUPLICATE_MESSAGE)
+
     def test_line_requires_email_channel_and_consent_can_be_withdrawn(self) -> None:
         with self.assertRaises(HTTPException) as context:
             main_module.create_guardian_contact(

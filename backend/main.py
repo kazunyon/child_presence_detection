@@ -411,6 +411,10 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+GUARDIAN_EMAIL_DUPLICATE_MESSAGE = """このメールアドレスは登録済みです。
+兄弟姉妹で、同じ保護者が管理する場合は、
+登録済み保護者の「編集」から、対象園児を追加してください。"""
+
 def normalize_email(value: str) -> str:
     normalized = value.strip().lower()
     local, separator, domain = normalized.rpartition("@")
@@ -1132,7 +1136,7 @@ def create_guardian_contact(data: GuardianContactIn, actor: Staff = Depends(requ
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "対象園児を1人以上選択してください")
     normalized = validate_guardian_settings(data.email, data.email_enabled, data.line_enabled, data.consent)
     if db.query(GuardianContact).filter_by(organization_id=actor.organization_id, email_normalized=normalized).first():
-        raise HTTPException(status.HTTP_409_CONFLICT, "このメールアドレスは登録済みです")
+        raise HTTPException(status.HTTP_409_CONFLICT, GUARDIAN_EMAIL_DUPLICATE_MESSAGE)
     item = GuardianContact(
         organization_id=actor.organization_id,
         name=data.name.strip() if data.name else None,
@@ -1176,7 +1180,7 @@ def update_guardian_contact(guardian_id: int, data: GuardianContactUpdate, actor
         GuardianContact.id != item.id,
     ).first()
     if duplicate:
-        raise HTTPException(status.HTTP_409_CONFLICT, "このメールアドレスは登録済みです")
+        raise HTTPException(status.HTTP_409_CONFLICT, GUARDIAN_EMAIL_DUPLICATE_MESSAGE)
     email_changed = "email" in values and normalized != item.email_normalized
     if "name" in values:
         item.name = values["name"].strip() if values["name"] else None
