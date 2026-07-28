@@ -524,6 +524,29 @@ class LineGuardianNotificationTest(unittest.TestCase):
         self.assertFalse(updated["email_enabled"])
         self.assertFalse(updated["line_enabled"])
         self.assertEqual(updated["line_status"], "revoked")
+    def test_updating_guardian_email_revokes_pending_line_link(self) -> None:
+        result = self.create_guardian()
+        guardian = self.db.get(main_module.GuardianContact, result["id"])
+        guardian.line_status = "pending"
+        request_row = main_module.LineLinkRequest(
+            organization_id=self.organization.id,
+            guardian_contact_id=guardian.id,
+            token_hash=main_module.line_link_token_hash("old-email-token"),
+            expires_at=main_module.utc_now() + main_module.timedelta(hours=1),
+            requested_by=self.actor.id,
+        )
+        self.db.add(request_row); self.db.commit()
+
+        updated = main_module.update_guardian_contact(
+            result["id"], main_module.GuardianContactUpdate(email="correct@example.jp"),
+            actor=self.actor, db=self.db,
+        )
+
+        self.db.refresh(request_row)
+        self.assertEqual(updated["email"], "correct@example.jp")
+        self.assertEqual(updated["line_status"], "not_requested")
+        self.assertEqual(request_row.status, "revoked")
+
     def test_line_link_issue_returns_banana_account_qr_without_storing_raw_link(self) -> None:
         result = self.create_guardian()
         guardian = self.db.get(main_module.GuardianContact, result["id"])

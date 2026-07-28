@@ -1177,10 +1177,15 @@ def update_guardian_contact(guardian_id: int, data: GuardianContactUpdate, actor
     ).first()
     if duplicate:
         raise HTTPException(status.HTTP_409_CONFLICT, "このメールアドレスは登録済みです")
+    email_changed = "email" in values and normalized != item.email_normalized
     if "name" in values:
         item.name = values["name"].strip() if values["name"] else None
     if "email" in values:
         item.email, item.email_normalized = email.strip(), normalized
+    if email_changed:
+        db.query(LineLinkRequest).filter_by(organization_id=actor.organization_id, guardian_contact_id=item.id, status="pending").update({"status": "revoked"})
+        if item.line_status in {"pending", "expired", "error"}:
+            item.line_status = "not_requested"
     item.email_enabled, item.line_enabled = email_enabled, line_enabled
     if "is_active" in values:
         item.is_active = values["is_active"]
