@@ -446,14 +446,12 @@ class VehicleVideoEvidenceTest(unittest.TestCase):
 
         self.assertEqual(str(response.path), str(target))
         self.assertEqual(response.media_type, "video/webm")
-    def test_complete_requires_vehicle_video(self) -> None:
-        with self.assertRaises(HTTPException) as context:
-            complete_trip(self.trip.id, actor=self.actor, db=self.db)
+    def test_complete_allows_single_vehicle_check_without_video(self) -> None:
+        result = complete_trip(self.trip.id, actor=self.actor, db=self.db)
 
-        self.assertEqual(context.exception.status_code, 409)
-        self.assertEqual(context.exception.detail, "5秒以上の車内撮影が必要です")
-        self.assertEqual(self.trip.status, "運行中")
-
+        self.assertEqual(result["status"], "完了")
+        self.assertEqual(self.trip.status, "完了")
+        self.assertIsNotNone(self.trip.completed_at)
     def test_video_duration_allows_5_to_30_seconds(self) -> None:
         validate_video_duration(5)
         validate_video_duration(30)
