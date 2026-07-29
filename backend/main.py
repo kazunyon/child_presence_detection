@@ -1088,8 +1088,6 @@ def complete_trip(trip_id: int, actor: Staff = Depends(require_roles("operator",
     if summary["unconfirmed"]: raise HTTPException(status.HTTP_409_CONFLICT, "未降車の園児がいるため完了できません")
     checks = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="tail_qr").count()
     if not checks: raise HTTPException(status.HTTP_409_CONFLICT, "車内確認が必要です")
-    approvals = db.query(VehicleSafetyCheck).filter_by(organization_id=actor.organization_id, trip_id=trip.id, check_type="third_party").count()
-    if not approvals: raise HTTPException(status.HTTP_409_CONFLICT, "第三者確認が必要です")
     trip.status = "完了"; trip.completed_at = datetime.now(timezone.utc); audit(db, actor, "trip.complete", "trip", trip.id); db.commit(); return {"status": "完了"}
 @app.post("/api/trips/{trip_id}/force-complete")
 def force_complete_trip(trip_id: int, actor: Staff = Depends(require_roles("admin")), db: Session = Depends(get_db)):

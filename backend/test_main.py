@@ -446,12 +446,16 @@ class VehicleVideoEvidenceTest(unittest.TestCase):
 
         self.assertEqual(str(response.path), str(target))
         self.assertEqual(response.media_type, "video/webm")
-    def test_complete_allows_single_vehicle_check_without_video(self) -> None:
+    def test_complete_allows_single_vehicle_check_without_video_or_third_party(self) -> None:
+        self.db.query(VehicleSafetyCheck).filter_by(trip_id=self.trip.id, check_type="third_party").delete()
+        self.db.commit()
+
         result = complete_trip(self.trip.id, actor=self.actor, db=self.db)
 
         self.assertEqual(result["status"], "完了")
         self.assertEqual(self.trip.status, "完了")
         self.assertIsNotNone(self.trip.completed_at)
+
     def test_video_duration_allows_5_to_30_seconds(self) -> None:
         validate_video_duration(5)
         validate_video_duration(30)
