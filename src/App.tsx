@@ -130,13 +130,34 @@ export default function App() {
       setMessage(`QRなしで${mode}を記録しました`)
     } catch(error) { setMessage(error instanceof Error ? error.message : 'QRなしの記録を保存できませんでした') }
   }
-  const returnSafetyCheck = async () => {
+  const returnSafetyCheck = () => {
+    if (!trip) return
+    setLocationStatus('車内撮影を開始します')
+    setVideoRecorder(true)
+  }
+  const uploadVehicleVideo = async (blob:Blob, durationSeconds:number) => {
     if (!trip) return
     const tripId = trip.trip_id
-    setLocationStatus('車内確認と送迎完了を記録しています…')
-    let latitude:string|undefined, longitude:string|undefined
+    const form = new FormData()
+    const extension = blob.type.includes('mp4') ? 'mp4' : 'webm'
+    form.append('file', blob, `vehicle-check-${tripId}-${new Date().toISOString().replace(/[:.]/g,'-')}.${extension}`)
+    form.append('duration_seconds', String(durationSeconds))
+    const headers:HeadersInit = token ? {Authorization:`Bearer ${token}`} : {}
     try {
+      const uploaded = await fetchWithTimeout(`${API}/api/trips/${tripId}/videos`, {method:'POST', headers, body:form}, VIDEO_UPLOAD_TIMEOUT_MS, '動画の保存に時間がかかっています。通信状況を確認して、もう一度撮影してください。')
+      if(!uploaded.ok) throw new Error(await messageOf(uploaded))
+      const video = await uploaded.json() as {id:number}
+      let aiMessage = ''
+      try {
+        const analyzed = await fetchWithTimeout(`${API}/api/videos/${video.id}/analyze`, auth({method:'POST'}), AI_ANALYZE_TIMEOUT_MS, 'AI補助確認が時間内に終わりませんでした')
+        if(!analyzed.ok) throw new Error(await messageOf(analyzed))
+        const result = await analyzed.json() as VideoAnalysis
+        aiMessage = result.ai_result || ''
+      } catch(error) {
+        aiMessage = `AI補助だけ完了しませんでした（${error instanceof Error ? error.message : '通信エラー'}）。`
+      }
       if (!trip.tail_confirmed) {
+        let latitude:string|undefined, longitude:string|undefined
         if (navigator.geolocation) {
           try {
             const position = await new Promise<GeolocationPosition>((resolve,reject) => navigator.geolocation.getCurrentPosition(resolve,reject,{timeout:10000,enableHighAccuracy:true}))
@@ -146,40 +167,16 @@ export default function App() {
           }
         }
         const check = await fetch(`${API}/api/vehicle-checks`,auth({method:'POST',body:JSON.stringify({trip_id:tripId,check_type:'tail_qr',qr_token:'return-vehicle-check',latitude,longitude})}))
-        if (!check.ok) throw new Error(await messageOf(check))
+        if(!check.ok) throw new Error(await messageOf(check))
       }
       const completed = await fetch(`${API}/api/trips/${tripId}/complete`,auth({method:'POST'}))
-      if (!completed.ok) throw new Error(await messageOf(completed))
+      if(!completed.ok) throw new Error(await messageOf(completed))
+      setVideoRecorder(false)
       setTrip(null)
       await loadDashboard()
       setLocationStatus('')
-      setMessage('車内確認と送迎完了を記録しました。次のバスを選んでください。')
-    } catch (error) { setLocationStatus('車内確認または送迎完了を保存できませんでした'); setMessage(error instanceof Error ? error.message : '車内確認または送迎完了を保存できませんでした') }
-  }
-  const uploadVehicleVideo = async (blob:Blob, durationSeconds:number) => {
-    if (!trip) return
-    const form = new FormData()
-    const extension = blob.type.includes('mp4') ? 'mp4' : 'webm'
-    form.append('file', blob, `vehicle-check-${trip.trip_id}-${new Date().toISOString().replace(/[:.]/g,'-')}.${extension}`)
-    form.append('duration_seconds', String(durationSeconds))
-    const headers:HeadersInit = token ? {Authorization:`Bearer ${token}`} : {}
-    try {
-      const uploaded = await fetchWithTimeout(`${API}/api/trips/${trip.trip_id}/videos`, {method:'POST', headers, body:form}, VIDEO_UPLOAD_TIMEOUT_MS, '動画の保存に時間がかかっています。通信状況を確認して、もう一度撮影してください。')
-      if(!uploaded.ok) throw new Error(await messageOf(uploaded))
-      const video = await uploaded.json() as {id:number}
-      try {
-        const analyzed = await fetchWithTimeout(`${API}/api/videos/${video.id}/analyze`, auth({method:'POST'}), AI_ANALYZE_TIMEOUT_MS, 'AI補助確認が時間内に終わりませんでした')
-        if(!analyzed.ok) throw new Error(await messageOf(analyzed))
-        const result = await analyzed.json() as VideoAnalysis
-        await refresh(trip.trip_id)
-        setVideoRecorder(false)
-        setMessage(result.ai_result || `${durationSeconds}秒の車内撮影とAI補助結果を保存しました。職員が再確認してください。`)
-      } catch(error) {
-        await refresh(trip.trip_id)
-        setVideoRecorder(false)
-        setMessage(`動画は保存しました。AI補助だけ完了しませんでした（${error instanceof Error ? error.message : '通信エラー'}）。職員が車内を再確認してください。`)
-      }
-    } catch(error) { setMessage(error instanceof Error ? error.message : '車内撮影を保存できませんでした'); throw error }
+      setMessage(aiMessage ? `車内撮影を証拠として保存し、送迎を完了しました。${aiMessage}` : `${durationSeconds}秒の車内撮影を証拠として保存し、送迎を完了しました。`)
+    } catch(error) { setMessage(error instanceof Error ? error.message : '車内撮影または送迎完了を保存できませんでした'); throw error }
   }
   const approve = async (staffId:number,pin:string) => { if (!trip) return; try { const r=await fetch(`${API}/api/trips/${trip.trip_id}/third-party-approval`,auth({method:'POST',body:JSON.stringify({staff_id:staffId,pin})})); if(!r.ok) throw new Error(await messageOf(r)); await refresh(trip.trip_id); setMessage('第三者確認を記録しました。完了処理が可能です。') } catch(error) { setMessage(error instanceof Error ? error.message : '第三者確認を保存できませんでした') } }
   const resumeTrip = async (item:TripListItem) => { setMode(item.direction==='帰り' ? '降車' : '乗車'); setView('operation'); await refresh(item.trip_id); setMessage(`${item.vehicle_name}の送迎を再開しました`) }
@@ -189,7 +186,7 @@ export default function App() {
   const content = view==='home' ? <Home dashboard={dashboard} onOperation={openOperation}/> : view==='operation' ? <Operation trip={trip} routes={routes} vehicles={vehicles} children={children} mode={mode} onRoster={updateRoster} onStart={startTrip} onLeave={leaveOperation} onCancel={cancelTripForReselection} onScan={()=>setScanner('child')} onManual={manualAttendance} onTail={returnSafetyCheck} onVideo={()=>setVideoRecorder(true)} locationStatus={locationStatus} onApprove={approve} onComplete={complete}/> : view==='children' ? <ChildrenPage operator={operator} auth={auth} onMessage={setMessage} onRefresh={loadBootstrap}/> : view==='records' ? <Records operator={operator} auth={auth} onMessage={setMessage} onResume={resumeTrip}/> : view==='line' ? <LineSettingsPage operator={operator} auth={auth} onMessage={setMessage} onRefresh={loadBootstrap}/> : <Settings operator={operator} auth={auth} onMessage={setMessage} onRefresh={loadBootstrap}/>
   return <div className="app"><header className="px-5 pt-5 pb-4 bg-white flex justify-between"><div><div className="text-xs font-bold text-teal">送迎バス安全確認</div><b className="text-xl">まもるバス</b></div><button className="border-0 bg-white text-sm font-bold" onClick={logout}>{operator.name}</button></header><main className="app-main px-5">{offlineCount>0&&<button className="w-full rounded-xl bg-amber-100 p-3 text-sm font-bold text-amber-900" onClick={sync}>未同期の記録 {offlineCount} 件 — 同期する</button>}<section className="mt-3 rounded-2xl bg-sand p-4 border border-amber-100"><p className="m-0 text-sm">{message}</p></section>{content}</main><Nav active={view} onChange={setView}/> {scanner&&<Scanner title={`${mode}QRを読み取る`} onRead={scanChild} onClose={()=>setScanner(null)}/>} {videoRecorder&&trip&&<VehicleVideoRecorder trip={trip} onUpload={uploadVehicleVideo} onClose={()=>setVideoRecorder(false)}/>}</div>
 }
-function Home({dashboard,onOperation}:{dashboard:Dashboard|null;onOperation:()=>void}) { return <><section className="mt-4 rounded-3xl bg-teal p-5 text-white"><p className="m-0 text-sm opacity-85">{dashboard?.organization_name||'園'}</p><h1 className="mt-1 mb-2 text-2xl font-black">本日の送迎状況</h1><p className="m-0 text-sm">{dashboard?.date||'集計を読み込み中です'}</p></section><section className="grid grid-cols-3 gap-3 mt-4"><Metric label="本日の便" value={dashboard?.today_trip_count||0}/><Metric label="運行中" value={dashboard?.active_trip_count||0}/><Metric label="未確認" value={dashboard?.unconfirmed_count||0} danger={(dashboard?.unconfirmed_count||0)>0}/></section><section className="card mt-4 p-5"><h2 className="m-0 text-lg font-black">運行</h2><p className="text-sm text-slate-600">バスと「行き／帰り」を選んで開始、または進行中の送迎を再開します。</p><button className="big-action" onClick={onOperation}>運行画面を開く</button></section><section className="card mt-4 p-5"><h2 className="m-0 text-lg font-black">安全上の注意</h2><p className="mb-0 text-sm text-slate-600">未降車の園児が1人でもいる間は、車内確認と完了はできません。必ず車内を目視で確認してください。</p></section></> }
+function Home({dashboard,onOperation}:{dashboard:Dashboard|null;onOperation:()=>void}) { return <><section className="mt-4 rounded-3xl bg-teal p-5 text-white"><p className="m-0 text-sm opacity-85">{dashboard?.organization_name||'園'}</p><h1 className="mt-1 mb-2 text-2xl font-black">本日の送迎状況</h1><p className="m-0 text-sm">{dashboard?.date||'集計を読み込み中です'}</p></section><section className="grid grid-cols-3 gap-3 mt-4"><Metric label="本日の便" value={dashboard?.today_trip_count||0}/><Metric label="運行中" value={dashboard?.active_trip_count||0}/><Metric label="未確認" value={dashboard?.unconfirmed_count||0} danger={(dashboard?.unconfirmed_count||0)>0}/></section><section className="card mt-4 p-5"><h2 className="m-0 text-lg font-black">運行</h2><p className="text-sm text-slate-600">バスと「行き／帰り」を選んで開始、または進行中の送迎を再開します。</p><button className="big-action" onClick={onOperation}>運行画面を開く</button></section><section className="card mt-4 p-5"><h2 className="m-0 text-lg font-black">安全上の注意</h2><p className="mb-0 text-sm text-slate-600">未降車の園児が1人でもいる間は、車内撮影と完了はできません。必ず車内を目視で確認してください。</p></section></> }
 function Metric({label,value,danger}:{label:string;value:number;danger?:boolean}) { return <section className="card p-3 text-center"><b className={'text-2xl '+(danger?'text-coral':'text-teal')}>{value}</b><br/><span className="text-xs">{label}</span></section> }
 function Operation({trip,routes,vehicles,children,mode,onRoster,onStart,onLeave,onCancel,onScan,onManual,onTail,onVideo,locationStatus,onApprove,onComplete}:{trip:TripStatus|null;routes:Route[];vehicles:Vehicle[];children:RosterChild[];mode:Mode;onRoster:(ids:number[])=>void;onStart:(r:Route)=>void;onLeave:()=>void;onCancel:()=>Promise<boolean>;onScan:()=>void;onManual:(childId:number)=>void;onTail:()=>void;onVideo:()=>void;locationStatus:string;onApprove:(id:number,pin:string)=>void;onComplete:()=>void}) {
   const [editingRoster,setEditingRoster] = useState(false)
@@ -203,7 +200,7 @@ function Operation({trip,routes,vehicles,children,mode,onRoster,onStart,onLeave,
     setCancelling(true)
     if (!await onCancel()) setCancelling(false)
   }
-  return <><div className="mt-4 grid grid-cols-2 gap-3"><button className="min-h-12 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-sm font-bold text-coral" onClick={()=>setConfirmingCancel(true)}>バスを選び直す</button><button className="min-h-12 rounded-xl border border-teal bg-white px-3 py-2 text-sm font-bold text-teal" onClick={onLeave}>一時保存してホームへ戻る</button></div>{confirmingCancel&&<section className="mt-3 rounded-2xl border-2 border-coral bg-red-50 p-4 text-red-900" role="alertdialog" aria-labelledby="cancel-trip-title"><h2 id="cancel-trip-title" className="m-0 text-base font-black">この送迎を中止して選び直しますか？</h2><p className="mb-0 mt-2 text-sm leading-6">乗降・車内確認をまだ記録していない場合だけ、バス選択へ戻れます。</p><div className="mt-3 grid grid-cols-2 gap-2"><button className="min-h-11 rounded-xl border border-slate-300 bg-white px-3 font-bold text-slate-700 disabled:opacity-50" disabled={cancelling} onClick={()=>setConfirmingCancel(false)}>戻る</button><button className="min-h-11 rounded-xl border-0 bg-coral px-3 font-bold text-white disabled:opacity-50" disabled={cancelling} onClick={()=>void confirmCancellation()}>{cancelling?'処理中…':'中止して選び直す'}</button></div></section>}<section className="mt-3 rounded-3xl bg-teal p-5 text-white"><p className="m-0 text-sm opacity-85">{trip.vehicle_name}・運行中</p><h1 className="mt-1 mb-1 text-2xl font-black">{mode==='乗車'?'行き':'帰り'}の送迎</h1><p className="m-0 text-sm">QRを読み取り、園児の確認をします</p></section><section className="card mt-4 p-4"><div className="flex justify-between items-center"><div><h2 className="m-0 text-lg font-black">確認状況</h2><p className="m-0 mt-1 text-sm text-slate-600">{mode==='乗車'?'乗車した園児':'降車を確認した園児'}を記録します</p></div><span className="badge bg-mint text-teal">{mode==='乗車'?'行き':'帰り'}</span></div><div className="grid grid-cols-3 text-center mt-3"><Metric label="確認済み" value={mode==='乗車'?trip.boarded:trip.alighted}/><Metric label="対象" value={trip.children.length}/><Metric label="未確認" value={remaining} danger={remaining>0}/></div></section>{mode==='降車'&&trip.unconfirmed>0&&<section className="mt-4 rounded-2xl border-2 border-coral bg-red-50 p-4 text-red-800"><b>未降車の園児が {trip.unconfirmed} 人います</b><p className="m-0 mt-1 text-sm">降車確認が終わるまで、安全確認・完了は行えません。</p></section>}<button className="big-action mt-4" onClick={onScan}>{actionLabel}</button><section className="card mt-4 overflow-hidden"><div className="p-4 flex justify-between items-center"><div><h2 className="m-0 text-lg font-black">このバスの園児</h2><p className="m-0 mt-1 text-sm text-slate-600">通常名簿をもとにしています。</p></div><button className="border-0 bg-white text-sm font-bold text-teal" onClick={()=>setEditingRoster(!editingRoster)}>{editingRoster?'閉じる':'当日変更'}</button></div>{editingRoster&&<TripRosterEditor children={children} selectedIds={trip.children.map(x=>x.child_id)} onSave={ids=>{onRoster(ids);setEditingRoster(false)}}/>}{trip.children.length===0?<p className="px-4 pb-4 text-sm text-slate-600">まだ確認された園児はいません。</p>:trip.children.map(x=><div className="px-4 py-3 border-t flex justify-between" key={x.child_id}><span>{x.name}</span><span className={'badge '+(!x.boarded_at?'bg-slate-100':x.alighted_at?'bg-teal text-white':'bg-red-100 text-red-800')}>{!x.boarded_at?'未確認':x.alighted_at?'確認済み':'未降車'}</span>{(x.boarded_manually||x.alighted_manually)&&<span className="badge bg-amber-100 text-amber-900">QRなし</span>}<button disabled={mode==='乗車'?!!x.boarded_at:!x.boarded_at||!!x.alighted_at} className="border-0 bg-white text-xs font-bold text-teal disabled:opacity-30" onClick={()=>onManual(x.child_id)}>QRなしで{mode}</button></div>)}</section><section className={'card mt-4 p-4 '+(allAlighted?'border-2 border-teal bg-mint':'')}><div className="flex items-center justify-between gap-3"><h2 className="m-0 text-lg font-black">帰りの完了前チェック</h2><span className={'badge '+(allAlighted?'bg-teal text-white':'bg-slate-100 text-slate-600')}>{allAlighted?'ACTIVE':'降車確認待ち'}</span></div><p className="text-sm text-slate-600">全員の降車確認後に、車内の目視確認と送迎完了を1回で記録します。</p><button disabled={!allAlighted||trip.status==='完了'} className="big-action mt-2 disabled:opacity-40" onClick={onTail}>{trip.tail_confirmed?'送迎を完了する':'車内確認して送迎を完了する'}</button>{locationStatus&&<p className="text-xs text-slate-600">{locationStatus}</p>}</section></>
+  return <><div className="mt-4 grid grid-cols-2 gap-3"><button className="min-h-12 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-sm font-bold text-coral" onClick={()=>setConfirmingCancel(true)}>バスを選び直す</button><button className="min-h-12 rounded-xl border border-teal bg-white px-3 py-2 text-sm font-bold text-teal" onClick={onLeave}>一時保存してホームへ戻る</button></div>{confirmingCancel&&<section className="mt-3 rounded-2xl border-2 border-coral bg-red-50 p-4 text-red-900" role="alertdialog" aria-labelledby="cancel-trip-title"><h2 id="cancel-trip-title" className="m-0 text-base font-black">この送迎を中止して選び直しますか？</h2><p className="mb-0 mt-2 text-sm leading-6">乗降・車内撮影をまだ記録していない場合だけ、バス選択へ戻れます。</p><div className="mt-3 grid grid-cols-2 gap-2"><button className="min-h-11 rounded-xl border border-slate-300 bg-white px-3 font-bold text-slate-700 disabled:opacity-50" disabled={cancelling} onClick={()=>setConfirmingCancel(false)}>戻る</button><button className="min-h-11 rounded-xl border-0 bg-coral px-3 font-bold text-white disabled:opacity-50" disabled={cancelling} onClick={()=>void confirmCancellation()}>{cancelling?'処理中…':'中止して選び直す'}</button></div></section>}<section className="mt-3 rounded-3xl bg-teal p-5 text-white"><p className="m-0 text-sm opacity-85">{trip.vehicle_name}・運行中</p><h1 className="mt-1 mb-1 text-2xl font-black">{mode==='乗車'?'行き':'帰り'}の送迎</h1><p className="m-0 text-sm">QRを読み取り、園児の確認をします</p></section><section className="card mt-4 p-4"><div className="flex justify-between items-center"><div><h2 className="m-0 text-lg font-black">確認状況</h2><p className="m-0 mt-1 text-sm text-slate-600">{mode==='乗車'?'乗車した園児':'降車を確認した園児'}を記録します</p></div><span className="badge bg-mint text-teal">{mode==='乗車'?'行き':'帰り'}</span></div><div className="grid grid-cols-3 text-center mt-3"><Metric label="確認済み" value={mode==='乗車'?trip.boarded:trip.alighted}/><Metric label="対象" value={trip.children.length}/><Metric label="未確認" value={remaining} danger={remaining>0}/></div></section>{mode==='降車'&&trip.unconfirmed>0&&<section className="mt-4 rounded-2xl border-2 border-coral bg-red-50 p-4 text-red-800"><b>未降車の園児が {trip.unconfirmed} 人います</b><p className="m-0 mt-1 text-sm">降車確認が終わるまで、安全確認・完了は行えません。</p></section>}<button className="big-action mt-4" onClick={onScan}>{actionLabel}</button><section className="card mt-4 overflow-hidden"><div className="p-4 flex justify-between items-center"><div><h2 className="m-0 text-lg font-black">このバスの園児</h2><p className="m-0 mt-1 text-sm text-slate-600">通常名簿をもとにしています。</p></div><button className="border-0 bg-white text-sm font-bold text-teal" onClick={()=>setEditingRoster(!editingRoster)}>{editingRoster?'閉じる':'当日変更'}</button></div>{editingRoster&&<TripRosterEditor children={children} selectedIds={trip.children.map(x=>x.child_id)} onSave={ids=>{onRoster(ids);setEditingRoster(false)}}/>}{trip.children.length===0?<p className="px-4 pb-4 text-sm text-slate-600">まだ確認された園児はいません。</p>:trip.children.map(x=><div className="px-4 py-3 border-t flex justify-between" key={x.child_id}><span>{x.name}</span><span className={'badge '+(!x.boarded_at?'bg-slate-100':x.alighted_at?'bg-teal text-white':'bg-red-100 text-red-800')}>{!x.boarded_at?'未確認':x.alighted_at?'確認済み':'未降車'}</span>{(x.boarded_manually||x.alighted_manually)&&<span className="badge bg-amber-100 text-amber-900">QRなし</span>}<button disabled={mode==='乗車'?!!x.boarded_at:!x.boarded_at||!!x.alighted_at} className="border-0 bg-white text-xs font-bold text-teal disabled:opacity-30" onClick={()=>onManual(x.child_id)}>QRなしで{mode}</button></div>)}</section><section className={'card mt-4 p-4 '+(allAlighted?'border-2 border-teal bg-mint':'')}><div className="flex items-center justify-between gap-3"><h2 className="m-0 text-lg font-black">帰りの完了前チェック</h2><span className={'badge '+(allAlighted?'bg-teal text-white':'bg-slate-100 text-slate-600')}>{allAlighted?'ACTIVE':'降車確認待ち'}</span></div><p className="text-sm text-slate-600">全員の降車確認後に、5〜30秒の車内撮影を証拠として保存し、送迎完了まで記録します。</p><button disabled={!allAlighted||trip.status==='完了'} className="big-action mt-2 disabled:opacity-40" onClick={onTail}>車内撮影して送迎を完了する</button>{locationStatus&&<p className="text-xs text-slate-600">{locationStatus}</p>}</section></>
 }
 function Login({onLogin}:{onLogin:(x:Operator,t:string)=>void}) {
   const [id,setId]=useState(''),[pin,setPin]=useState(''),[error,setError]=useState(''),[recovery,setRecovery]=useState(false),[token,setToken]=useState(''),[newPin,setNewPin]=useState(''),[notice,setNotice]=useState('')
