@@ -257,52 +257,115 @@ python -m unittest test_main.py
 
 ## Renderへのインストール・環境変数設定
 
-Renderでは、FastAPI、PostgreSQL、動画保存用Persistent Diskをまとめて管理します。設定画面は次を使います。
+Renderでは、FastAPI、PostgreSQL、動画保存用Persistent Diskを管理します。ここでいう「インストール」は、PCへソフトを入れる作業ではなく、GitHubのソースからRender上にAPIとDBを作成して接続する作業です。
 
-- Render Dashboard: [まもるバス Render Environment](https://dashboard.render.com/project/prj-d9gumscvikkc73a61qpg/environment/evm-d9gumscvikkc73a61qq0)
-- 設定ファイル: `render.yaml`
+- 既存環境: [まもるバス Render Environment](https://dashboard.render.com/project/prj-d9gumscvikkc73a61qpg/environment/evm-d9gumscvikkc73a61qq0)
+- 構成定義: [render.yaml](render.yaml)
+- 公式資料: [Render Blueprint](https://render.com/docs/infrastructure-as-code)、[環境変数とSecret](https://render.com/docs/configure-environment-variables)
 
-### 1. Renderサービスの作成・確認
+> [!IMPORTANT]
+> `render.yaml` にはPostgreSQLのplan `starter` と1GBのPersistent Diskが定義されています。新規作成やプラン変更の前に、Render画面に表示される月額料金を必ず確認してください。Free Web ServiceではPersistent Diskを使用できず、通常ファイル領域へ保存した動画は再デプロイ等で失われます。
 
-1. Render Dashboardを開き、対象プロジェクトに `mamoru-bus-api` と `mamoru-bus-db` があることを確認します。
-2. 新規作成する場合は、GitHubリポジトリからBlueprintとして `render.yaml` を読み込ませます。
-3. Web Serviceは `backend` をRoot Directoryとして使います。
-4. Start Commandが `uvicorn main:app --host 0.0.0.0 --port $PORT` になっていることを確認します。
-5. Health Check Pathが `/health` になっていることを確認します。
-6. Persistent Disk `mamoru-bus-uploads` が `/var/data` にマウントされていることを確認します。
+### 0. 事前準備
 
-### 2. Render環境変数の確認
+次を準備します。
 
-RenderのEnvironment画面では、次の値を確認または登録します。値そのものはREADMEへ貼り付けません。
+- Renderへログインできるアカウント
+- GitHubの `kazunyon/child_presence_detection` をRenderから読み取れる権限
+- LINE Developersから取得するChannel access tokenとChannel secret
+- 本番で使用する園のDB上のorganization ID
+- メール配信アダプターのWebhook URLと送信元アドレス
+- Secretを保管するパスワードマネージャー
 
-| 環境変数 | 設定方法 | 確認内容 |
+> [!WARNING]
+> Channel access token、Channel secret、JWT Secret、PIN、復旧トークンは、GitHub、README、Issue、画面キャプチャへ貼り付けないでください。RenderではSecretとして保存します。
+
+### 1. 既存環境を確認する場合
+
+1. [まもるバス Render Environment](https://dashboard.render.com/project/prj-d9gumscvikkc73a61qpg/environment/evm-d9gumscvikkc73a61qq0)を開きます。
+2. Environment内にWeb Serviceの **mamoru-bus-api** とPostgreSQLの **mamoru-bus-db** があることを確認します。
+3. **mamoru-bus-api → Settings** で、Repositoryが `kazunyon/child_presence_detection`、Branchが `main`、Root Directoryが `backend` であることを確認します。
+4. Build Commandが `pip install -r requirements.txt`、Start Commandが `uvicorn main:app --host 0.0.0.0 --port $PORT` であることを確認します。
+5. Health Check Pathが `/health` であることを確認します。
+6. **mamoru-bus-api → Disks** で、Persistent Diskが `/var/data` にマウントされていることを確認します。
+7. **mamoru-bus-api → Environment** で、後述の環境変数が存在することを確認します。Secretの値は表示・共有しません。
+
+### 2. 新しいRender環境を作る場合（Blueprint）
+
+1. Render Dashboardで **New → Blueprint** を選びます。
+2. GitHubを接続し、リポジトリ **kazunyon/child_presence_detection** を選びます。Privateリポジトリが一覧に出ない場合は、RenderのGitHub Appへ対象リポジトリの読取権限を追加します。
+3. Blueprint Pathはリポジトリ直下の `render.yaml` を指定します。
+4. 作成予定の **mamoru-bus-api**、**mamoru-bus-db**、Persistent Disk、料金プランを確認します。
+5. `sync: false` の環境変数を入力します。まだ通知試験を始めない場合も、`NOTIFICATION_FEATURE_ENABLED` は `false` のままにします。
+6. **Apply / Deploy Blueprint** を実行し、作成完了まで待ちます。
+7. Blueprint作成後、Environment画面で各サービスの状態が **Live / Available** になったことを確認します。
+
+`render.yaml` により、次が自動設定されます。
+
+| 対象 | 自動設定される内容 | 導入者が確認すること |
 |---|---|---|
-| `DATABASE_URL` | `mamoru-bus-db` から自動連携 | PostgreSQLの接続文字列になっている |
-| `JWT_SECRET` | Renderで自動生成、または長いランダム値を登録 | 32文字以上の推測困難な値 |
-| `CORS_ORIGINS` | 固定値 | `https://kazunyon.github.io` |
-| `ENVIRONMENT` | 固定値 | `production` |
-| `UPLOAD_DIR` | 固定値 | `/var/data/mamoru-bus-uploads` |
-| `TOKEN_EXPIRE_MINUTES` | 固定値 | `480` |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Developersから取得 | Messaging APIのチャネルアクセストークン |
-| `LINE_CHANNEL_SECRET` | LINE Developersから取得 | Webhook署名検証用のChannel secret |
-| `LINE_BASIC_ID` | 固定値 | `@785ntzvy` |
-| `LINE_OFFICIAL_ACCOUNT_NAME` | 固定値 | `バナナ幼稚園` |
-| `LINE_LINK_TOKEN_PEPPER` | Renderで自動生成、または長いランダム値を登録 | QR連携トークンのハッシュ強化用Secret |
-| `LINE_LINK_EXPIRE_HOURS` | 固定値 | `24` |
-| `LINE_ORGANIZATION_ID` | DB上の園IDを登録 | このLINE公式アカウントを使う園のID |
-| `EMAIL_WEBHOOK_URL` | メール配信アダプターのURL | テスト送信先で受信確認できるURL |
-| `EMAIL_FROM_ADDRESS` | メール送信元 | 園または検証用の送信元アドレス |
-| `NOTIFICATION_FEATURE_ENABLED` | 初期値は `false` | LINE・メール結合試験が終わるまで `true` にしない |
+| Web Service | Python、Root Directory、Build／Start Command、Health Check | RepositoryとBranchが正しい |
+| PostgreSQL | `mamoru-bus-db` を作成 | plan、容量、接続状態 |
+| DB接続 | `DATABASE_URL` をDBから連携 | 手入力で上書きしていない |
+| CORS | `https://kazunyon.github.io` を許可 | 別ドメインを使う場合は追加 |
+| 動画保存 | `/var/data` をマウントし、`UPLOAD_DIR` を設定 | Diskが付いている、容量に余裕がある |
+| Secret | `JWT_SECRET` と `LINE_LINK_TOKEN_PEPPER` を生成 | 再作成・上書きを安易に行わない |
 
-### 3. デプロイ後の確認
+### 3. Renderへ登録する環境変数
 
-1. RenderでManual Deployまたは自動Deployを実行します。
-2. Deploy Logで依存関係のインストール、DB接続、起動エラーがないことを確認します。
-3. `https://<Render API URL>/health` を開き、APIが応答することを確認します。
-4. GitHubリポジトリの **Settings → Secrets and variables → Actions → Variables** に `VITE_API_BASE_URL` を登録し、値をRender API URLにします。
-5. GitHub Pagesを再デプロイし、公開画面からログインできることを確認します。
+登録場所は **mamoru-bus-api → Environment** です。値を変更した場合は、Save後の再デプロイ完了まで待ちます。
 
-`VITE_API_BASE_URL` はブラウザへ埋め込まれるため、GitHub ActionsのSecretではなくVariableに登録します。Secret、PIN、LINEアクセストークンはフロントエンド側へ渡さないでください。
+| 環境変数 | 値の取得元・設定値 | Secret扱い | 確認内容 |
+|---|---|---:|---|
+| `DATABASE_URL` | `mamoru-bus-db` から自動連携 | はい | PostgreSQL接続文字列。手入力しない |
+| `JWT_SECRET` | Render自動生成、または32文字以上のランダム値 | はい | 変更すると既存ログインが無効になる |
+| `CORS_ORIGINS` | `https://kazunyon.github.io` | いいえ | 末尾の不要な `/` を付けない |
+| `ENVIRONMENT` | `production` | いいえ | 本番動作になっている |
+| `UPLOAD_DIR` | `/var/data/mamoru-bus-uploads` | いいえ | Diskのマウント先配下である |
+| `TOKEN_EXPIRE_MINUTES` | `480` | いいえ | JWTの有効時間（分） |
+| `ADMIN_PIN_RECOVERY_TOKEN` | 緊急復旧時だけ作るランダム値 | はい | 復旧後は削除する |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE DevelopersのMessaging APIタブ | はい | 対象チャネルのトークンである |
+| `LINE_CHANNEL_SECRET` | LINE DevelopersのBasic settings | はい | 対象チャネルのSecretである |
+| `LINE_BASIC_ID` | `@785ntzvy` | いいえ | バナナ幼稚園のBasic IDと一致 |
+| `LINE_OFFICIAL_ACCOUNT_NAME` | `バナナ幼稚園` | いいえ | 案内メール・画面の表示名 |
+| `LINE_LINK_TOKEN_PEPPER` | Render自動生成、または32文字以上のランダム値 | はい | DBへ保存する連携トークンの保護用 |
+| `LINE_LINK_EXPIRE_HOURS` | `24` | いいえ | QR／連携リンクの有効時間 |
+| `LINE_ORGANIZATION_ID` | 本番DBで確認した園ID | いいえ | 推測で `1` と決めない |
+| `EMAIL_WEBHOOK_URL` | 採用したメール配信アダプター | はい | HTTPSの送信先URL |
+| `EMAIL_FROM_ADDRESS` | 園または検証用の送信元 | いいえ | 配信事業者で使用可能なアドレス |
+| `NOTIFICATION_FEATURE_ENABLED` | 初期は `false` | いいえ | 結合試験・園責任者承認後だけ `true` |
+
+### 4. GitHub PagesからRender APIへ接続する
+
+1. **mamoru-bus-api → Settings** で公開URL（例: `https://mamoru-bus-api.onrender.com`）を確認します。
+2. ブラウザで `https://<Render API URL>/health` を開き、正常応答を確認します。
+3. GitHubリポジトリで **Settings → Secrets and variables → Actions → Variables** を開きます。
+4. Repository variable `VITE_API_BASE_URL` を作成し、値をRender API URLにします。末尾の `/` は付けません。
+5. GitHub PagesのWorkflowを再実行するか、`main` の次回更新で再デプロイします。
+6. 公開画面を再読み込みし、ログインとAPI通信を確認します。
+
+`VITE_API_BASE_URL` はブラウザへ埋め込まれる公開URLなのでGitHub Actionsの **Variable** に登録します。LINEのTokenやSecretは、GitHub Actionsにもフロントエンドにも登録しません。
+
+### 5. Renderデプロイ後の確認
+
+1. **Events / Deploys** で最新デプロイが成功していることを確認します。
+2. **Logs** でPython依存関係、DB接続、マイグレーション、Uvicorn起動のエラーがないことを確認します。
+3. `/health` が応答することを確認します。
+4. アプリからログインし、設定画面と過去記録を開けることを確認します。
+5. 5〜30秒のテスト動画を保存し、記録詳細の「動画を開く」から再生できることを確認します。
+6. LINE設定後は、LINE DevelopersのVerifyとテストアカウントの連携確認を行います。
+
+### 6. Renderで失敗した場合
+
+| 症状 | 主な確認箇所 |
+|---|---|
+| Repositoryが選べない | Render GitHub AppのRepository access |
+| Build Failed | Deploy Log、`backend/requirements.txt`、Root Directory |
+| `/health` が404 | API URL、Start Command、Health Check Path |
+| DB接続エラー | `mamoru-bus-db` の状態、`DATABASE_URL` の自動連携 |
+| 公開画面だけAPIエラー | `VITE_API_BASE_URL`、`CORS_ORIGINS`、GitHub Pages再デプロイ |
+| 動画が再デプロイ後に消える | Persistent Disk、マウント先、`UPLOAD_DIR` |
+| 環境変数を直しても変わらない | Save後の再デプロイ完了、変数名の綴り |
 
 ## 管理者PINの安全な復旧
 
@@ -318,62 +381,116 @@ RenderのEnvironment画面では、次の値を確認または登録します。
 
 ## LINE Developersのインストール・Messaging API設定
 
-採用するLINE公式アカウントは **バナナ幼稚園（`@785ntzvy`）** です。
-
-LINE Developersの設定画面は次を使います。
+採用するLINE公式アカウントは **バナナ幼稚園（`@785ntzvy`）** です。ここでいう「インストール」は、LINE公式アカウントでMessaging APIを有効化し、LINE DevelopersとRenderをWebhookで接続する作業です。
 
 - LINE Developers Console: [https://developers.line.biz/console/](https://developers.line.biz/console/)
+- LINE Official Account Manager: [https://manager.line.biz/](https://manager.line.biz/)
+- 公式手順: [Messaging APIを始める](https://developers.line.biz/en/docs/messaging-api/getting-started/)、[Botを構築する](https://developers.line.biz/en/docs/messaging-api/building-bot/)
 
-### 1. Messaging APIチャネルの確認
+> [!IMPORTANT]
+> 現在は、LINE Developers ConsoleからMessaging APIチャネルを直接新規作成できません。先にLINE公式アカウントを作成し、LINE Official Account ManagerでMessaging APIを有効化すると、LINE Developers側にチャネルが作成されます。
 
-1. LINE Developers Consoleを開きます。
-2. バナナ幼稚園のProviderを選択します。
-3. 公式アカウント `@785ntzvy` に接続されたMessaging APIチャネルを開きます。
-4. Channel basic settingsで、チャネル名、Provider、Channel IDを確認します。
-5. Messaging API settingsで、Basic IDが `@785ntzvy` であることを確認します。
+### 0. 既存の「バナナ幼稚園」を使うか確認する
 
-### 2. LINE DevelopersからRenderへ登録する値
+新しい公式アカウントを作る前に、既存の `@785ntzvy` を使えるか確認します。
 
-LINE Developersで確認した値を、RenderのEnvironmentへ登録します。
+1. [LINE Official Account Manager](https://manager.line.biz/)へログインし、**バナナ幼稚園** が表示されることを確認します。
+2. [LINE Developers Console](https://developers.line.biz/console/)へ同じBusiness IDでログインします。
+3. 対象Providerを開き、バナナ幼稚園のMessaging APIチャネルが表示されることを確認します。
+4. **Basic settings** の権限で自分がAdminであることを確認します。
+5. **Messaging API** タブのBasic IDが `@785ntzvy` であることを確認します。
 
-| LINE Developersの場所 | Render環境変数 | 補足 |
-|---|---|---|
-| Messaging API settings → Channel access token | `LINE_CHANNEL_ACCESS_TOKEN` | 長期チャネルアクセストークンを発行して登録する |
-| Channel basic settings → Channel secret | `LINE_CHANNEL_SECRET` | Webhook署名検証で使う |
-| Messaging API settings → Basic ID | `LINE_BASIC_ID` | `@785ntzvy` |
-| 運用で決めた公式アカウント名 | `LINE_OFFICIAL_ACCOUNT_NAME` | `バナナ幼稚園` |
-| Renderで生成するSecret | `LINE_LINK_TOKEN_PEPPER` | QR連携トークンのハッシュ強化用。LINE側には登録しない |
-| DB上の園ID | `LINE_ORGANIZATION_ID` | 新規開発DBでは `1` の場合が多いが、本番DBでは必ず確認する |
+既存チャネルが確認できた場合は、新規作成せず「2. チャネル情報をRenderへ登録する」へ進みます。見つからない場合、別のBusiness IDでログインしていないか、Providerまたは公式アカウントの管理権限が付いているかを確認します。
 
-### 3. Webhook URLの設定
+### 1. LINE公式アカウントを新規作成する場合
 
-1. Renderで `mamoru-bus-api` の公開URLを確認します。
-2. LINE DevelopersのMessaging API settingsを開きます。
-3. Webhook URLに `https://<Render API URL>/api/integrations/line/webhook` を設定します。
-4. Use webhookを有効にします。
-5. Verifyを押し、LINE Developers側で疎通できることを確認します。
-6. Renderのログで、Webhookの署名エラー、404、500が出ていないことを確認します。
+既存の `@785ntzvy` を利用する場合、この手順は不要です。
 
-Webhook URLはGitHub PagesのURLではなく、RenderのFastAPI URLを使います。GitHub Pagesは画面配信だけを担当し、LINE Webhookを受け取ることはできません。
+1. LINE Business IDを準備し、[LINE Official Account Manager](https://manager.line.biz/)でLINE公式アカウントを作成します。
+2. 作成した公式アカウントを開き、**設定 → Messaging API** からMessaging APIの利用を有効にします。
+3. 管理するProviderを選択します。Providerは園または運営会社を表す単位として、将来の担当者管理も考えて選びます。
+4. Provider確定後、[LINE Developers Console](https://developers.line.biz/console/)へ同じBusiness IDでログインします。
+5. 選択したProviderの中にMessaging APIチャネルが作成されたことを確認します。
 
-### 4. メール配信アダプターの設定
+> [!CAUTION]
+> LINE公式アカウントへ割り当てたProviderは、後から変更・解除できません。個人用Providerを安易に選ばず、園または運営会社の管理方針を決めてから確定してください。
 
-選定したメール配信アダプターのURLを `EMAIL_WEBHOOK_URL`、送信元を `EMAIL_FROM_ADDRESS` へ設定します。Webhookには件名、本文、連携URL、QR画像Data URL等をJSONで送ります。
+### 2. チャネル情報をRenderへ登録する
 
-### 5. 結合確認と有効化
+LINE Developers Consoleで **Provider → バナナ幼稚園のMessaging APIチャネル** を開きます。
 
-1. Renderでは `NOTIFICATION_FEATURE_ENABLED=false` のままにします。
-2. 管理者が設定画面で保護者、メール、対象園児、通知同意、LINE希望を登録します。
-3. 「QR案内を発行」を押し、テスト用メールでQR案内を受信します。
-4. テスト用LINEアカウントで公式アカウントを友だち追加します。
-5. メールのQRまたはリンクを開き、LINEトークで `連携 <token>` を送信します。
-6. 管理画面で保護者が `LINE ON` または連携済み状態になることを確認します。
-7. テスト送迎で降車記録を作成し、LINEとメールが併送されることを確認します。
-8. 通知履歴で `sent`、失敗時の理由、再送回数を確認します。
-9. 片側失敗、個別再送、LINE連携解除、通知停止・同意撤回をテストします。
-10. 園責任者の承認後、Renderで `NOTIFICATION_FEATURE_ENABLED=true` にして再デプロイします。
+| LINE Developersの場所 | 取得する値 | Render環境変数 | 注意 |
+|---|---|---|---|
+| **Basic settings** | Channel secret | `LINE_CHANNEL_SECRET` | Secretとして保存。再発行すると旧Secretは無効 |
+| **Messaging API** | Channel access token | `LINE_CHANNEL_ACCESS_TOKEN` | Secretとして保存。READMEへ貼らない |
+| **Messaging API** | Basic ID | `LINE_BASIC_ID` | バナナ幼稚園は `@785ntzvy` |
+| 運用で決定 | 表示名 | `LINE_OFFICIAL_ACCOUNT_NAME` | `バナナ幼稚園` |
+| Renderで生成 | ランダム値 | `LINE_LINK_TOKEN_PEPPER` | LINE側には登録しない |
+| 本番DBで確認 | 園ID | `LINE_ORGANIZATION_ID` | 推測値を使わない |
 
-連携トークンの平文はDBへ保存しません。案内メールの送信に失敗した場合、同じリンクを再送せず、管理画面から新しいQR案内を再発行します。LINE／メール設定が未完了の場合は `failed` として履歴へ残ります。実在する保護者へ送る前に必ずテストアカウントで確認してください。
+Channel access tokenが未発行の場合は、Messaging APIタブのChannel access token欄から発行します。現在の実装・検証で使用するトークン方式を決め、失効・再発行時の交換手順も記録してください。再発行した場合はRenderの値を更新し、再デプロイします。
+
+### 3. Webhook URLを接続する
+
+1. Renderで **mamoru-bus-api** の公開URLを確認します。
+2. LINE Developersで **Messaging API → Webhook settings → Webhook URL** を開きます。
+3. 次のURLを登録します: `https://<Render API URL>/api/integrations/line/webhook`
+4. **Update** で保存します。
+5. **Verify** を押し、成功することを確認します。
+6. **Use webhook** を有効にします。
+7. RenderのLogsで404、500、署名検証エラーがないことを確認します。
+
+> [!NOTE]
+> Webhook URLはGitHub PagesのURLではありません。LINEからのPOSTを受けるFastAPIのRender URLを指定します。URLはHTTPSで、外部から到達できる必要があります。
+
+このAPIは `x-line-signature` と `LINE_CHANNEL_SECRET` を使って署名を検証します。署名検証を外したり、LINEの送信元IPだけで安全性を判断したりしないでください。
+
+### 4. LINE Official Account Manager側を確認する
+
+1. [LINE Official Account Manager](https://manager.line.biz/)でバナナ幼稚園を開きます。
+2. **設定 → 応答設定** で、Messaging APIを利用する運用になっていることを確認します。
+3. あいさつメッセージや応答メッセージを使用する場合は、アプリの案内と重複・矛盾しない文章にします。
+4. テスト担当者が公式アカウントを友だち追加できることを確認します。
+
+### 5. メール配信アダプターを設定する
+
+LINE希望者にもメールを必須とし、降車完了はLINEとメールへ別々に併送します。
+
+1. メール配信アダプターのHTTPS URLをRenderの `EMAIL_WEBHOOK_URL` に登録します。
+2. 使用可能な送信元を `EMAIL_FROM_ADDRESS` に登録します。
+3. テスト用メールへ、件名、本文、連携URL、QR画像が届くことを確認します。
+4. メール失敗時に同じ期限付きリンクを使い回さず、管理画面から新しいQR案内を再発行します。
+
+### 6. LINE連携の結合テスト
+
+実在する保護者へ送信する前に、園のテスト用メールアドレスとLINEアカウントで確認します。
+
+1. Renderの `NOTIFICATION_FEATURE_ENABLED=false` を維持します。
+2. 管理画面でテスト保護者、メール、園児、通知同意、LINE希望を登録します。
+3. 「QR案内を発行」を押し、メールを受信します。
+4. テスト用LINEアカウントでバナナ幼稚園を友だち追加します。
+5. メールのQRまたはリンクを使い、LINEトークで表示された `連携 <token>` を送信します。
+6. 管理画面で対象保護者がLINE連携済みになったことを確認します。
+7. テスト送迎で降車記録を作成し、LINEとメールがそれぞれ1通届くことを確認します。
+8. 通知履歴で各経路の `sent`、失敗理由、再送回数を確認します。
+9. LINEだけ失敗、メールだけ失敗、個別再送、連携解除、同意撤回を確認します。
+10. 園責任者が結果を確認した後、Renderの `NOTIFICATION_FEATURE_ENABLED=true` を保存し、再デプロイします。
+11. 有効化後もテスト保護者で最終確認してから実在する保護者を登録します。
+
+### 7. LINEで失敗した場合
+
+| 症状 | 主な確認箇所 |
+|---|---|
+| Provider／チャネルが見つからない | 同じBusiness ID、ProviderのAdmin権限、公式アカウント側のMessaging API有効化 |
+| Verifyが失敗する | Render APIがLive、Webhook URLの綴り、HTTPS、末尾パス |
+| 署名エラー | 対象チャネルのChannel secret、再発行の有無、Render再デプロイ |
+| 401／403で送信失敗 | Channel access tokenの対象・失効・再発行 |
+| 友だち追加しても連携されない | Use webhook、Render Logs、`連携 <token>` の期限 |
+| 別の園へ紐付く | `LINE_ORGANIZATION_ID` と本番DBの園ID |
+| LINEは届くがメールが届かない | `EMAIL_WEBHOOK_URL`、`EMAIL_FROM_ADDRESS`、メール側ログ |
+| 設定後も自動通知されない | `NOTIFICATION_FEATURE_ENABLED`、再デプロイ、通知同意 |
+
+連携トークンの平文はDBへ保存しません。QR／連携リンクは期限付き・一回限りです。LINEとメールの片方が成功しても、もう片方の結果は別に記録します。
 
 ## 現在できないこと・導入前の必須対応
 
