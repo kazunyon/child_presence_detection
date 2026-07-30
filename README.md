@@ -13,6 +13,8 @@
 > [!IMPORTANT]
 > 現在は開発途中の試作版です。公開ページは画面と基本操作を確認するためのデモであり、実際の送迎業務にはまだ使用できません。
 
+![「まもるバス」LINE・メール通知連携の仕組み](docs/images/mamoru-bus-line-mail-notification-flow.png)
+
 ## 公開デモ
 
 [まもるバスを開く](https://kazunyon.github.io/child_presence_detection/)

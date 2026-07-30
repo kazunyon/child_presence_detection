@@ -10,4 +10,5 @@ __pycache__/
 .env
 *.docx
 *.png
+!docs/images/mamoru-bus-line-mail-notification-flow.png
 outputs/*
