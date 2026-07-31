@@ -22,6 +22,121 @@
 
 GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名の例：`mamoru-bus-api`）へ認証済みリクエストを送ります。データはAPI側のデータベースへ保存されます。GitHub Pages単体ではFastAPIやデータベースは動作しません。
 
+## インストールガイド
+
+利用目的に応じて、次のいずれかを選びます。
+
+| 目的 | 必要な作業 |
+|---|---|
+| 公開デモを試す | インストール不要。上の「まもるバスを開く」から利用 |
+| PCで開発・動作確認する | Git、Node.js、Pythonを準備し、フロントエンドとAPIを起動 |
+| 新しい公開環境を作る | RenderへAPI・DBを配置し、GitHub Pagesから接続 |
+
+> [!IMPORTANT]
+> 公開デモを試すだけなら、PCへのインストールやRenderの設定は必要ありません。現在は開発途中の試作版のため、実際の送迎業務には使用しないでください。
+
+### 1. 公開デモを使う
+
+1. 上の [まもるバスを開く](https://kazunyon.github.io/child_presence_detection/) を押します。
+2. ブラウザで画面が開いたら、ログインして基本操作を確認します。
+3. iPhoneへ追加する場合は、Safariの **共有 → ホーム画面に追加 → 追加** を押します。
+4. PC版Chromeでは、アドレスバー付近のインストールアイコンが表示された場合に、そこからPWAとして追加できます。
+
+公開デモのログイン情報は、管理者から安全な方法で受け取ってください。PINやSecretはREADMEへ記載しません。
+
+### 2. PCへ開発環境をインストールする
+
+#### 必要なもの
+
+- [Git](https://git-scm.com/downloads)
+- [Node.js](https://nodejs.org/)（GitHub Pagesのビルド環境はNode.js 22）
+- [Python](https://www.python.org/downloads/)
+- Windows PowerShellまたはターミナル
+
+#### ソースコードを取得する
+
+PowerShellを開き、次を実行します。
+
+```powershell
+git clone https://github.com/kazunyon/child_presence_detection.git
+cd child_presence_detection
+```
+
+Privateリポジトリを取得できない場合は、GitHubへログインし、このリポジトリの閲覧権限があることを確認してください。
+
+#### バックエンド（FastAPI）を起動する
+
+1つ目のPowerShellで実行します。
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m uvicorn main:app --reload --port 8000
+```
+
+起動後、ブラウザで [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health) を開き、APIが応答することを確認します。
+
+ローカル環境では、環境変数を指定しなければSQLiteの `backend/mamoru_bus.db` を使用します。開発用の動画は `backend/uploads` に保存されます。
+
+> [!NOTE]
+> PowerShellで仮想環境の有効化が制限された場合は、`.\.venv\Scripts\python.exe -m pip install -r requirements.txt`、続けて `.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000` を実行できます。
+
+#### フロントエンド（React）を起動する
+
+2つ目のPowerShellで、リポジトリ直下へ移動して実行します。
+
+```powershell
+npm install
+npm run dev
+```
+
+画面に表示されたURL（通常は [http://localhost:5173](http://localhost:5173)）を開きます。ローカル起動時は、`VITE_API_BASE_URL` を指定しなければ `http://127.0.0.1:8000` のAPIへ接続します。
+
+#### 起動を終了する
+
+フロントエンドとバックエンドを起動した各PowerShellで、`Ctrl + C` を押します。
+
+### 3. RenderとGitHub Pagesへインストールする
+
+公開環境は、次の順番で準備します。
+
+1. Renderで `render.yaml` を使い、FastAPIの **mamoru-bus-api**、PostgreSQLの **mamoru-bus-db**、動画保存用Persistent Diskを作成します。
+2. Renderの `/health` が正常に応答することを確認します。
+3. GitHubの **Settings → Secrets and variables → Actions → Variables** に、`VITE_API_BASE_URL` を登録します。
+4. 値にはRender APIの公開URLを指定します。例：`https://mamoru-bus-api.onrender.com`
+5. GitHubの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** にします。
+6. GitHub Actionsの `Deploy PWA to GitHub Pages` が成功したことを確認します。
+7. 公開デモを開き、ログイン、記録保存、動画表示、API通信を確認します。
+
+詳しい手順は、後述の [Renderへのインストール・環境変数設定](#renderへのインストール環境変数設定) と [LINE Developersのインストール・Messaging API設定](#line-developersのインストールmessaging-api設定) を参照してください。
+
+> [!WARNING]
+> `JWT_SECRET`、LINEのChannel access token／Channel secret、職員PINなどは、GitHubやフロントエンドへ登録しないでください。SecretはRenderのEnvironmentへ保存します。
+
+### 4. インストール後の基本確認
+
+| 確認項目 | 正常な状態 |
+|---|---|
+| FastAPI | `/health` が正常応答する |
+| React画面 | ログイン画面が表示される |
+| API接続 | ログイン後に園・車両・記録を取得できる |
+| データ保存 | 再読み込み後も登録内容が残る |
+| 動画 | 5〜30秒のテスト動画を保存し、記録詳細から開ける |
+| 通知 | テスト用のLINE・メールだけで確認してから有効化する |
+
+### 5. よくあるインストールエラー
+
+| 症状 | 確認すること |
+|---|---|
+| `npm` が見つからない | Node.jsをインストール後、PowerShellを開き直す |
+| `python` が見つからない | Pythonをインストールし、PATH設定を確認する |
+| 画面がAPIエラーになる | FastAPIが8000番で起動しているか確認する |
+| GitHub Pagesだけ接続できない | `VITE_API_BASE_URL`、Renderの公開URL、`CORS_ORIGINS` を確認する |
+| RenderのBuildが失敗する | Root Directoryが `backend`、Build Commandが `pip install -r requirements.txt` であることを確認する |
+| 動画が再デプロイ後に消える | Persistent Diskと `UPLOAD_DIR` の設定を確認する |
+
 ## 2026年7月29日現在の実装状況
 
 | 機能 | 状況 | 内容 |
