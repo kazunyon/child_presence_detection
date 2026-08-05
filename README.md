@@ -20,7 +20,7 @@
 [まもるバスを開く](https://kazunyon.github.io/child_presence_detection/)
 
 
-GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名の例：`mamoru-bus-api`）へ認証済みリクエストを送ります。データはAPI側のデータベースへ保存されます。GitHub Pages単体ではFastAPIやデータベースは動作しません。
+GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名の例：`mamoru-bus-api`）へ認証済みリクエストを送ります。FastAPIはNeon PostgreSQLへ接続し、データを保存します。GitHub Pages単体ではFastAPIやデータベースは動作しません。
 
 ## インストールガイド
 
@@ -30,10 +30,10 @@ GitHub PagesはReact画面を配信し、Render上のFastAPI（サービス名�
 |---|---|
 | 公開デモを試す | インストール不要。上の「まもるバスを開く」から利用 |
 | PCで開発・動作確認する | Git、Node.js、Pythonを準備し、フロントエンドとAPIを起動 |
-| 新しい公開環境を作る | RenderへAPI・DBを配置し、GitHub Pagesから接続 |
+| 新しい公開環境を作る | RenderへAPI、NeonへDBを配置し、GitHub Pagesから接続 |
 
 > [!IMPORTANT]
-> 公開デモを試すだけなら、PCへのインストールやRenderの設定は必要ありません。現在は開発途中の試作版のため、実際の送迎業務には使用しないでください。
+> 公開デモを試すだけなら、PCへのインストールやRender・Neonの設定は必要ありません。現在は開発途中の試作版のため、実際の送迎業務には使用しないでください。
 
 ### 1. 公開デモを使う
 
@@ -98,22 +98,24 @@ npm run dev
 
 フロントエンドとバックエンドを起動した各PowerShellで、`Ctrl + C` を押します。
 
-### 3. RenderとGitHub Pagesへインストールする
+### 3. Render API・Neon PostgreSQL・GitHub Pagesへインストールする
 
 公開環境は、次の順番で準備します。
 
-1. Renderで `render.yaml` を使い、FastAPIの **mamoru-bus-api**、PostgreSQLの **mamoru-bus-db**、動画保存用Persistent Diskを作成します。
-2. Renderの `/health` が正常に応答することを確認します。
-3. GitHubの **Settings → Secrets and variables → Actions → Variables** に、`VITE_API_BASE_URL` を登録します。
-4. 値にはRender APIの公開URLを指定します。例：`https://mamoru-bus-api.onrender.com`
-5. GitHubの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** にします。
-6. GitHub Actionsの `Deploy PWA to GitHub Pages` が成功したことを確認します。
-7. 公開デモを開き、ログイン、記録保存、動画表示、API通信を確認します。
+1. NeonでPostgreSQLプロジェクトを準備します。現在の移行先は **mamoru_bus_db_2** です。
+2. RenderでFastAPIの **mamoru-bus-api** と動画保存用Persistent Diskを作成します。
+3. Renderの **mamoru-bus-api → Environment** で、`DATABASE_URL` をNeonの接続文字列に設定します。
+4. Renderの `/health` が正常に応答することを確認します。
+5. GitHubの **Settings → Secrets and variables → Actions → Variables** に、`VITE_API_BASE_URL` を登録します。
+6. 値にはRender APIの公開URLを指定します。例：`https://mamoru-bus-api.onrender.com`
+7. GitHubの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** にします。
+8. GitHub Actionsの `Deploy PWA to GitHub Pages` が成功したことを確認します。
+9. 公開デモを開き、ログイン、記録保存、動画表示、API通信を確認します。
 
-詳しい手順は、後述の [Renderへのインストール・環境変数設定](#renderへのインストール環境変数設定) と [LINE Developersのインストール・Messaging API設定](#line-developersのインストールmessaging-api設定) を参照してください。
+詳しい手順は、後述の [Render API・Neon PostgreSQLの環境変数設定](#render-apineon-postgresqlの環境変数設定) と [LINE Developersのインストール・Messaging API設定](#line-developersのインストールmessaging-api設定) を参照してください。
 
 > [!WARNING]
-> `JWT_SECRET`、LINEのChannel access token／Channel secret、職員PINなどは、GitHubやフロントエンドへ登録しないでください。SecretはRenderのEnvironmentへ保存します。
+> `DATABASE_URL`、`JWT_SECRET`、LINEのChannel access token／Channel secret、職員PINなどは、GitHubやフロントエンドへ登録しないでください。SecretはRenderのEnvironmentやNeon Dashboardで管理します。
 
 ### 4. インストール後の基本確認
 
@@ -133,8 +135,9 @@ npm run dev
 | `npm` が見つからない | Node.jsをインストール後、PowerShellを開き直す |
 | `python` が見つからない | Pythonをインストールし、PATH設定を確認する |
 | 画面がAPIエラーになる | FastAPIが8000番で起動しているか確認する |
-| GitHub Pagesだけ接続できない | `VITE_API_BASE_URL`、Renderの公開URL、`CORS_ORIGINS` を確認する |
-| RenderのBuildが失敗する | Root Directoryが `backend`、Build Commandが `pip install -r requirements.txt` であることを確認する |
+| GitHub Pagesだけ接続できない | `VITE_API_BASE_URL`、Render APIの公開URL、`CORS_ORIGINS` を確認する |
+| Render APIのBuildが失敗する | Root Directoryが `backend`、Build Commandが `pip install -r requirements.txt` であることを確認する |
+| DB接続エラーになる | Renderの `DATABASE_URL` がNeonの接続文字列になっているか確認する |
 | 動画が再デプロイ後に消える | Persistent Diskと `UPLOAD_DIR` の設定を確認する |
 
 ## 2026年7月29日現在の実装状況
@@ -301,7 +304,7 @@ Render Free環境ではShellが使えない、または本番サーバー内の�
 職員のスマートフォン
   └─ GitHub Pages（React PWA）
        └─ Render（FastAPI / mamoru-bus-api）
-            ├─ データベース
+            ├─ Neon PostgreSQL（mamoru_bus_db_2）
             ├─ 動画証跡（Render Persistent Disk / ローカルファイル保存）
             ├─ 通知Webhook
             └─ LINE Messaging API
@@ -310,6 +313,7 @@ Render Free環境ではShellが使えない、または本番サーバー内の�
 - フロントエンド：React、TypeScript、Vite、Tailwind CSS、vite-plugin-pwa
 - バックエンド：FastAPI、Python、SQLAlchemy
 - 開発用データベース：SQLite
+- 本番データベース：Neon PostgreSQL（`mamoru_bus_db_2`）
 - 公開画面：GitHub Pages
 - 公開API：Render
 
@@ -353,6 +357,7 @@ python -m unittest test_main.py
 | 環境変数 | 用途 |
 |---|---|
 | `VITE_API_BASE_URL` | フロントエンドが接続するFastAPIのURL |
+| `DATABASE_URL` | FastAPIが接続するデータベースURL。本番はNeon PostgreSQLの接続文字列 |
 | `ADMIN_PIN_RECOVERY_TOKEN` | 管理者PINを緊急復旧するための一時トークン |
 | `NOTIFICATION_WEBHOOK_URL` | 通知先Webhook |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging APIのアクセストークン |
@@ -367,21 +372,22 @@ python -m unittest test_main.py
 | `NOTIFICATION_FEATURE_ENABLED` | 降車時の自動配信を有効化するフラグ |
 | `UPLOAD_DIR` | 動画ファイルの保存先。未指定時はバックエンドの `./uploads` |
 
-`render.yaml` では、Render Persistent Diskを `/var/data` にマウントし、`UPLOAD_DIR=/var/data/mamoru-bus-uploads` を指定しています。Renderの通常ファイル領域やローカル保存だけにすると、再デプロイやインスタンス再作成で動画ファイルが消える可能性があります。本番運用ではPersistent Diskの容量、保存期限、削除手順、バックアップ、またはS3/R2等のオブジェクトストレージ連携を別途決めてください。
+`render.yaml` では、Render Persistent Diskを `/var/data` にマウントし、`UPLOAD_DIR=/var/data/mamoru-bus-uploads` を指定しています。DBはRender PostgreSQLではなくNeon PostgreSQLを使用するため、本番の `DATABASE_URL` はRenderのEnvironmentでNeonの接続文字列へ差し替えます。Renderの通常ファイル領域やローカル保存だけにすると、再デプロイやインスタンス再作成で動画ファイルが消える可能性があります。本番運用ではPersistent Diskの容量、保存期限、削除手順、バックアップ、またはS3/R2等のオブジェクトストレージ連携を別途決めてください。
 
 > [!WARNING]
 > 本番用のトークン、Secret、PINは、Git、README、画面キャプチャ、ブラウザの保存領域へ記録しないでください。動作確認用の認証情報も公開リポジトリには記載しないでください。
 
-## Renderへのインストール・環境変数設定
+## Render API・Neon PostgreSQLの環境変数設定
 
-Renderでは、FastAPI、PostgreSQL、動画保存用Persistent Diskを管理します。ここでいう「インストール」は、PCへソフトを入れる作業ではなく、GitHubのソースからRender上にAPIとDBを作成して接続する作業です。
+公開環境では、RenderはFastAPIと動画保存用Persistent Diskを管理し、PostgreSQLはNeonを使用します。ここでいう「インストール」は、PCへソフトを入れる作業ではなく、GitHubのソースからRender上にAPIを作成し、Neon PostgreSQLへ接続する作業です。
 
-- 既存環境: [まもるバス Render Environment](https://dashboard.render.com/project/prj-d9gumscvikkc73a61qpg/environment/evm-d9gumscvikkc73a61qq0)
+- 既存API環境: [まもるバス Render Environment](https://dashboard.render.com/project/prj-d9gumscvikkc73a61qpg/environment/evm-d9gumscvikkc73a61qq0)
+- DB環境: Neon Project Dashboardの **mamoru_bus_db_2**
 - 構成定義: [render.yaml](render.yaml)
-- 公式資料: [Render Blueprint](https://render.com/docs/infrastructure-as-code)、[環境変数とSecret](https://render.com/docs/configure-environment-variables)
+- 公式資料: [Render Blueprint](https://render.com/docs/infrastructure-as-code)、[環境変数とSecret](https://render.com/docs/configure-environment-variables)、[Neon Docs](https://neon.tech/docs)
 
 > [!IMPORTANT]
-> `render.yaml` にはPostgreSQLのplan `starter` と1GBのPersistent Diskが定義されています。新規作成やプラン変更の前に、Render画面に表示される月額料金を必ず確認してください。Free Web ServiceではPersistent Diskを使用できず、通常ファイル領域へ保存した動画は再デプロイ等で失われます。
+> 現在、Render PostgreSQLは使用していません。`render.yaml` には旧構成のRender PostgreSQL定義が残っているため、Blueprintをそのまま適用する場合でも、本番の `DATABASE_URL` はRenderのEnvironmentでNeonの接続文字列へ上書きしてください。Free Web ServiceではPersistent Diskを使用できず、通常ファイル領域へ保存した動画は再デプロイ等で失われます。
 
 ### 0. 事前準備
 
@@ -389,53 +395,76 @@ Renderでは、FastAPI、PostgreSQL、動画保存用Persistent Diskを管理し
 
 - Renderへログインできるアカウント
 - GitHubの `kazunyon/child_presence_detection` をRenderから読み取れる権限
+- Neon Project Dashboard **mamoru_bus_db_2** へアクセスできる権限
+- Neonの接続文字列（`sslmode=require` 付きの `DATABASE_URL`）
 - LINE Developersから取得するChannel access tokenとChannel secret
 - 本番で使用する園のDB上のorganization ID
 - メール配信アダプターのWebhook URLと送信元アドレス
 - Secretを保管するパスワードマネージャー
 
 > [!WARNING]
-> Channel access token、Channel secret、JWT Secret、PIN、復旧トークンは、GitHub、README、Issue、画面キャプチャへ貼り付けないでください。RenderではSecretとして保存します。
+> `DATABASE_URL`、Channel access token、Channel secret、JWT Secret、PIN、復旧トークンは、GitHub、README、Issue、画面キャプチャへ貼り付けないでください。RenderではSecretとして保存し、Neonの接続文字列はNeon Dashboardまたはパスワードマネージャーで管理します。
 
 ### 1. 既存環境を確認する場合
 
 1. [まもるバス Render Environment](https://dashboard.render.com/project/prj-d9gumscvikkc73a61qpg/environment/evm-d9gumscvikkc73a61qq0)を開きます。
-2. Environment内にWeb Serviceの **mamoru-bus-api** とPostgreSQLの **mamoru-bus-db** があることを確認します。
+2. Environment内にWeb Serviceの **mamoru-bus-api** があることを確認します。
 3. **mamoru-bus-api → Settings** で、Repositoryが `kazunyon/child_presence_detection`、Branchが `main`、Root Directoryが `backend` であることを確認します。
 4. Build Commandが `pip install -r requirements.txt`、Start Commandが `uvicorn main:app --host 0.0.0.0 --port $PORT` であることを確認します。
 5. Health Check Pathが `/health` であることを確認します。
 6. **mamoru-bus-api → Disks** で、Persistent Diskが `/var/data` にマウントされていることを確認します。
-7. **mamoru-bus-api → Environment** で、後述の環境変数が存在することを確認します。Secretの値は表示・共有しません。
+7. **mamoru-bus-api → Environment** で、`DATABASE_URL` がNeon PostgreSQLの接続文字列になっていることを確認します。Secretの値は表示・共有しません。
+8. Neon Project Dashboardで **mamoru_bus_db_2** が利用可能であることを確認します。
 
-### 2. 新しいRender環境を作る場合（Blueprint）
+### 2. Render PostgreSQLからNeonへ移行済みの内容
 
-1. Render Dashboardで **New → Blueprint** を選びます。
+2026年8月5日時点で、旧Render PostgreSQLからNeon PostgreSQLへのschema/data移行は完了しています。作業ログでは、PostgreSQL 18.4の `pg_dump` と `psql` を使い、schema-onlyとdata-onlyの順でNeonへ反映しています。
+
+Neon側で確認済みの主要テーブル件数は次の通りです。
+
+| テーブル | 件数 |
+|---|---:|
+| `organizations` | 1 |
+| `staff` | 3 |
+| `vehicles` | 3 |
+| `children` | 3 |
+| `bus_routes` | 4 |
+| `bus_trips` | 58 |
+| `trip_attendance` | 71 |
+| `vehicle_safety_checks` | 42 |
+
+移行時に使用した旧DB・新DBの接続文字列はREADMEへ記載しません。必要な場合はRender Environment、Neon Dashboard、パスワードマネージャーで確認してください。
+
+### 3. 新しいRender API環境を作る場合
+
+1. Render DashboardでWeb Serviceを作成します。
 2. GitHubを接続し、リポジトリ **kazunyon/child_presence_detection** を選びます。Privateリポジトリが一覧に出ない場合は、RenderのGitHub Appへ対象リポジトリの読取権限を追加します。
-3. Blueprint Pathはリポジトリ直下の `render.yaml` を指定します。
-4. 作成予定の **mamoru-bus-api**、**mamoru-bus-db**、Persistent Disk、料金プランを確認します。
-5. `sync: false` の環境変数を入力します。まだ通知試験を始めない場合も、`NOTIFICATION_FEATURE_ENABLED` は `false` のままにします。
-6. **Apply / Deploy Blueprint** を実行し、作成完了まで待ちます。
-7. Blueprint作成後、Environment画面で各サービスの状態が **Live / Available** になったことを確認します。
+3. Root Directoryは `backend` を指定します。
+4. Build Commandは `pip install -r requirements.txt`、Start Commandは `uvicorn main:app --host 0.0.0.0 --port $PORT` を指定します。
+5. Health Check Pathは `/health` を指定します。
+6. 動画保存が必要な場合は、Persistent Diskを `/var/data` にマウントし、`UPLOAD_DIR=/var/data/mamoru-bus-uploads` を設定します。
+7. Neon Project Dashboardで **mamoru_bus_db_2** の接続文字列を取得し、Renderの `DATABASE_URL` にSecretとして登録します。
+8. `sync: false` の環境変数を入力します。まだ通知試験を始めない場合も、`NOTIFICATION_FEATURE_ENABLED` は `false` のままにします。
+9. デプロイ後、Renderのサービス状態が **Live** になったことを確認します。
 
-`render.yaml` により、次が自動設定されます。
+`render.yaml` を使ってBlueprintを作る場合、次を確認してください。
 
-| 対象 | 自動設定される内容 | 導入者が確認すること |
+| 対象 | 現在の扱い | 導入者が確認すること |
 |---|---|---|
 | Web Service | Python、Root Directory、Build／Start Command、Health Check | RepositoryとBranchが正しい |
-| PostgreSQL | `mamoru-bus-db` を作成 | plan、容量、接続状態 |
-| DB接続 | `DATABASE_URL` をDBから連携 | 手入力で上書きしていない |
+| DB接続 | Neonの `DATABASE_URL` をRender Environmentへ手動登録 | Render PostgreSQLの自動連携値を使っていない |
 | CORS | `https://kazunyon.github.io` を許可 | 別ドメインを使う場合は追加 |
 | 動画保存 | `/var/data` をマウントし、`UPLOAD_DIR` を設定 | Diskが付いている、容量に余裕がある |
-| Secret | `JWT_SECRET` と `LINE_LINK_TOKEN_PEPPER` を生成 | 再作成・上書きを安易に行わない |
+| Secret | `JWT_SECRET` と `LINE_LINK_TOKEN_PEPPER` を登録または生成 | 再作成・上書きを安易に行わない |
 
-### 3. Renderへ登録する環境変数
+### 4. Renderへ登録する環境変数
 
 登録場所は **mamoru-bus-api → Environment** です。値を変更した場合は、Save後の再デプロイ完了まで待ちます。
 
 | 環境変数 | 値の取得元・設定値 | Secret扱い | 確認内容 |
 |---|---|---:|---|
-| `DATABASE_URL` | `mamoru-bus-db` から自動連携 | はい | PostgreSQL接続文字列。手入力しない |
-| `JWT_SECRET` | Render自動生成、または32文字以上のランダム値 | はい | 変更すると既存ログインが無効になる |
+| `DATABASE_URL` | Neon Project Dashboard **mamoru_bus_db_2** の接続文字列 | はい | `sslmode=require` を含むPostgreSQL接続文字列。READMEへ貼らない |
+| `JWT_SECRET` | 32文字以上のランダム値 | はい | 変更すると既存ログインが無効になる |
 | `CORS_ORIGINS` | `https://kazunyon.github.io` | いいえ | 末尾の不要な `/` を付けない |
 | `ENVIRONMENT` | `production` | いいえ | 本番動作になっている |
 | `UPLOAD_DIR` | `/var/data/mamoru-bus-uploads` | いいえ | Diskのマウント先配下である |
@@ -445,14 +474,14 @@ Renderでは、FastAPI、PostgreSQL、動画保存用Persistent Diskを管理し
 | `LINE_CHANNEL_SECRET` | LINE DevelopersのBasic settings | はい | 対象チャネルのSecretである |
 | `LINE_BASIC_ID` | `@785ntzvy` | いいえ | バナナ幼稚園のBasic IDと一致 |
 | `LINE_OFFICIAL_ACCOUNT_NAME` | `バナナ幼稚園` | いいえ | 案内メール・画面の表示名 |
-| `LINE_LINK_TOKEN_PEPPER` | Render自動生成、または32文字以上のランダム値 | はい | DBへ保存する連携トークンの保護用 |
+| `LINE_LINK_TOKEN_PEPPER` | 32文字以上のランダム値 | はい | DBへ保存する連携トークンの保護用 |
 | `LINE_LINK_EXPIRE_HOURS` | `24` | いいえ | QR／連携リンクの有効時間 |
-| `LINE_ORGANIZATION_ID` | 本番DBで確認した園ID | いいえ | 推測で `1` と決めない |
+| `LINE_ORGANIZATION_ID` | Neonの本番DBで確認した園ID | いいえ | 推測で `1` と決めない |
 | `EMAIL_WEBHOOK_URL` | 採用したメール配信アダプター | はい | HTTPSの送信先URL |
 | `EMAIL_FROM_ADDRESS` | 園または検証用の送信元 | いいえ | 配信事業者で使用可能なアドレス |
 | `NOTIFICATION_FEATURE_ENABLED` | 初期は `false` | いいえ | 結合試験・園責任者承認後だけ `true` |
 
-### 4. GitHub PagesからRender APIへ接続する
+### 5. GitHub PagesからRender APIへ接続する
 
 1. **mamoru-bus-api → Settings** で公開URL（例: `https://mamoru-bus-api.onrender.com`）を確認します。
 2. ブラウザで `https://<Render API URL>/health` を開き、正常応答を確認します。
@@ -461,25 +490,27 @@ Renderでは、FastAPI、PostgreSQL、動画保存用Persistent Diskを管理し
 5. GitHub PagesのWorkflowを再実行するか、`main` の次回更新で再デプロイします。
 6. 公開画面を再読み込みし、ログインとAPI通信を確認します。
 
-`VITE_API_BASE_URL` はブラウザへ埋め込まれる公開URLなのでGitHub Actionsの **Variable** に登録します。LINEのTokenやSecretは、GitHub Actionsにもフロントエンドにも登録しません。
+`VITE_API_BASE_URL` はブラウザへ埋め込まれる公開URLなのでGitHub Actionsの **Variable** に登録します。`DATABASE_URL`、LINEのToken、SecretはGitHub Actionsにもフロントエンドにも登録しません。
 
-### 5. Renderデプロイ後の確認
+### 6. Render API・Neon DB接続の確認
 
-1. **Events / Deploys** で最新デプロイが成功していることを確認します。
-2. **Logs** でPython依存関係、DB接続、マイグレーション、Uvicorn起動のエラーがないことを確認します。
+1. Renderの **Events / Deploys** で最新デプロイが成功していることを確認します。
+2. Renderの **Logs** でPython依存関係、DB接続、マイグレーション、Uvicorn起動のエラーがないことを確認します。
 3. `/health` が応答することを確認します。
 4. アプリからログインし、設定画面と過去記録を開けることを確認します。
-5. 5〜30秒のテスト動画を保存し、記録詳細の「動画を開く」から再生できることを確認します。
-6. LINE設定後は、LINE DevelopersのVerifyとテストアカウントの連携確認を行います。
+5. Neon側で主要テーブルの件数を確認し、移行直後の件数と大きな差異がないことを確認します。
+6. 5〜30秒のテスト動画を保存し、記録詳細の「動画を開く」から再生できることを確認します。
+7. LINE設定後は、LINE DevelopersのVerifyとテストアカウントの連携確認を行います。
 
-### 6. Renderで失敗した場合
+### 7. Render API・Neon接続で失敗した場合
 
 | 症状 | 主な確認箇所 |
 |---|---|
 | Repositoryが選べない | Render GitHub AppのRepository access |
 | Build Failed | Deploy Log、`backend/requirements.txt`、Root Directory |
 | `/health` が404 | API URL、Start Command、Health Check Path |
-| DB接続エラー | `mamoru-bus-db` の状態、`DATABASE_URL` の自動連携 |
+| DB接続エラー | Renderの `DATABASE_URL`、Neonの接続文字列、SSL設定、Neon Projectの稼働状態 |
+| Render PostgreSQLへつながってしまう | `DATABASE_URL` が旧Render DBの値、または `render.yaml` の `fromDatabase` 自動連携値になっていないか |
 | 公開画面だけAPIエラー | `VITE_API_BASE_URL`、`CORS_ORIGINS`、GitHub Pages再デプロイ |
 | 動画が再デプロイ後に消える | Persistent Disk、マウント先、`UPLOAD_DIR` |
 | 環境変数を直しても変わらない | Save後の再デプロイ完了、変数名の綴り |
