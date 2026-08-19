@@ -117,6 +117,379 @@ README、ルーティング、メニュー、画面設計、権限定義、テ�
 
 実機でしか再現できないカメラ、GPS、通知、PWAインストールなどは、実機キャプチャを使う。代替画像で埋めない。
 
+## Playwrightによる操作テスト・実画面キャプチャ
+
+Playwrightを利用できるWeb／PWAでは、手作業だけで画面を撮るのではなく、操作手順をPlaywright Testとして再現可能な形にし、テスト実行時に実画面キャプチャを取得する。
+
+### 目的
+
+Playwrightは次のために使う。
+
+- 操作マニュアルに載せる操作を実際に自動実行する
+- 操作前後の画面を同じ条件で再取得できるようにする
+- Locator、画面遷移、表示結果をテストとして残す
+- UI Modeで各操作の前後、ログ、エラー、通信を視覚的に確認する
+- 画面改修後に同じシナリオを再実行し、差分画像を再取得する
+
+Playwrightテストが成功しても、実機固有機能まで確認済みとはみなさない。PWAインストール、Safari固有挙動、カメラ、実GPS、通知、OS権限画面などは必要に応じて実機確認へ切り分ける。
+
+### 前提確認
+
+最初に次を確認する。
+
+```powershell
+npx playwright --version
+npx playwright test --list
+```
+
+`playwright.config.ts`、`tests/`、対象プロジェクト名、`baseURL`、対象ブラウザを確認する。
+
+ブラウザが未導入の場合のみ実行する。
+
+```powershell
+npx playwright install
+```
+
+WindowsでFirefox／WebKitのDLL依存エラーがある場合は、操作マニュアル用キャプチャを無理に全ブラウザで取得せず、正常に起動できるChromiumを基準にする。Safari固有確認は別の確認項目として残す。
+
+### 操作マニュアル用テストを作成する
+
+操作マニュアル作成を依頼された場合は、既存テストだけに依存せず、原則として操作マニュアル専用テストを作る。
+
+推奨配置:
+
+```text
+tests/
+└─ operation-manual/
+   ├─ login.spec.ts
+   ├─ common.spec.ts
+   ├─ admin.spec.ts
+   └─ main-scenario.spec.ts
+```
+
+小規模なシステムでは1ファイルでもよい。
+
+```text
+tests/operation-manual.spec.ts
+```
+
+テスト名には、画面ID、対象ロール、目的が分かる情報を含める。
+
+```ts
+import { test, expect } from '@playwright/test';
+
+const capture = async (page, fileName: string) => {
+  await page.screenshot({
+    path: `manual-captures/${fileName}`,
+    fullPage: true,
+  });
+};
+
+test('@manual @admin SCR-001 管理者がログインする', async ({ page }) => {
+  await test.step('ログイン画面を表示する', async () => {
+    await page.goto('/');
+    await expect(page).toHaveTitle(/システム名/);
+    await capture(page, 'SCR-001_step-01_login-initial.png');
+  });
+
+  await test.step('職員IDを入力する', async () => {
+    await page.getByLabel('職員ID').fill(process.env.TEST_STAFF_ID ?? '');
+  });
+
+  await test.step('PINを入力する', async () => {
+    await page.getByLabel('PIN').fill(process.env.TEST_STAFF_PIN ?? '');
+    await capture(page, 'SCR-001_step-02_login-input.png');
+  });
+
+  await test.step('ログインする', async () => {
+    await page.getByRole('button', { name: 'ログイン' }).click();
+    await expect(page.getByText('ホーム')).toBeVisible();
+    await capture(page, 'SCR-002_step-03_home.png');
+  });
+});
+```
+
+上記はテンプレートであり、実際のラベル、ボタン名、タイトル、完了表示は実画面に合わせて変更する。テストを通すために存在しない文言を仮定しない。
+
+### 1操作1 `test.step`
+
+操作手順書とテストの対応を明確にするため、原則としてマニュアル上の1操作をPlaywrightの1つの `test.step()` に対応させる。
+
+```ts
+await test.step('「保存」を押す', async () => {
+  await page.getByRole('button', { name: '保存' }).click();
+});
+```
+
+手順書の番号、`test.step`、キャプチャファイル名、画面IDを追跡できる状態にする。
+
+### Locatorの優先順位
+
+Locatorは、利用者が実画面で認識できるラベルや役割を優先する。
+
+1. `getByRole()`
+2. `getByLabel()`
+3. `getByPlaceholder()`
+4. `getByText()`
+5. `getByTestId()`
+6. CSS／XPathは最後の手段
+
+推奨:
+
+```ts
+page.getByRole('button', { name: 'ログイン' })
+page.getByLabel('職員ID')
+page.getByText('運行記録')
+```
+
+避ける:
+
+```ts
+page.locator('div:nth-child(3) > div > button')
+```
+
+コード生成結果に壊れやすいLocatorが含まれる場合は、実画面を確認して安定したLocatorへ修正する。
+
+### Codegenで操作を記録する
+
+新規シナリオの初期作成にはCodegenを使用できる。
+
+```powershell
+npx playwright codegen https://example.com/
+```
+
+Chromiumを明示する場合:
+
+```powershell
+npx playwright codegen --browser=chromium https://example.com/
+```
+
+WindowsでiPhone相当の縦画面を確認する場合、WebKit依存エラーを避ける必要があれば、Chromiumに画面サイズを指定する。
+
+```powershell
+npx playwright codegen --browser=chromium --viewport-size="390,844" --lang="ja-JP" --timezone="Asia/Tokyo" https://example.com/
+```
+
+これはiPhone Safariそのものではない。`390x844` のモバイル相当表示をChromiumで確認する方式として記録する。
+
+生成コードを直接保存する場合:
+
+```powershell
+npx playwright codegen --browser=chromium --output="tests\operation-manual\codegen.spec.ts" https://example.com/
+```
+
+Codegenの生成コードはそのまま完成扱いにしない。次を修正する。
+
+- テスト名
+- Locator
+- 秘密情報の直書き
+- `expect()` による結果確認
+- `test.step()`
+- キャプチャ保存処理
+- 危険操作の除外またはテスト環境化
+
+### UI Modeを標準確認手段として使う
+
+操作マニュアル用Playwrightテストを作成したら、通常実行だけでなくUI Modeで確認する。
+
+```powershell
+npx playwright test --ui
+```
+
+特定プロジェクトだけ確認する場合:
+
+```powershell
+npx playwright test --ui --project=chromium
+```
+
+UI Modeでは、テスト一覧から1件ずつ実行し、次を確認する。
+
+- `Actions`: 操作がマニュアルの手順順になっているか
+- `Before`: 操作直前の画面が正しいか
+- `After`: 操作結果の画面が正しいか
+- `Locator`: 操作対象が意図した画面要素に一致しているか
+- `Source`: どのテストコードに対応するか
+- `Call` / `Log`: 待機、クリック、入力の状態
+- `Errors`: タイムアウト、Locator不一致、表示失敗
+- `Console`: JavaScriptエラーやブラウザログ
+- `Network`: APIリクエスト、HTTPステータス、通信失敗
+- `Attachments`: スクリーンショット、動画、添付証跡
+- `Metadata`: プロジェクト、ブラウザ、実行条件
+
+テストを監視しながら修正する場合はWatch機能を使い、テストコード保存後に再実行して確認する。
+
+UI Modeでテストが成功しても、各キャプチャを実際に開いてマニュアル掲載に適する状態か確認する。成功件数だけで完成判定しない。
+
+### 通常実行とデバッグ
+
+Chromiumで通常実行:
+
+```powershell
+npx playwright test --project=chromium
+```
+
+ブラウザを表示して実行:
+
+```powershell
+npx playwright test --project=chromium --headed
+```
+
+Inspectorで1操作ずつ確認:
+
+```powershell
+npx playwright test --project=chromium --debug
+```
+
+特定ファイルだけ実行:
+
+```powershell
+npx playwright test tests/operation-manual/admin.spec.ts --project=chromium --headed
+```
+
+HTMLレポート:
+
+```powershell
+npx playwright show-report
+```
+
+### キャプチャ取得ルール
+
+`page.screenshot()` を使い、操作マニュアル掲載用画像を明示的に保存する。
+
+```ts
+await page.screenshot({
+  path: 'manual-captures/SCR-010_step-03_settings.png',
+  fullPage: true,
+});
+```
+
+キャプチャは原則として次のタイミングで取得する。
+
+- 初期表示
+- 入力前
+- 入力完了後
+- 重要なボタンを押す直前
+- 操作結果が表示された直後
+- 確認ダイアログ
+- エラー表示
+- 完了表示
+
+ただし、同一画面で変化がない状態を過剰に撮影しない。
+
+推奨ディレクトリ:
+
+```text
+manual-captures/
+├─ original/
+├─ masked/
+└─ annotated/
+```
+
+Playwrightで取得した元画像を `original` とし、秘密情報を非可逆マスクした画像を `masked`、矢印・番号を付けた掲載用画像を `annotated` とする。
+
+### スクリーンショットをテスト結果へ添付する
+
+UI ModeやHTMLレポートでも確認できるよう、重要画像は `test.info().attach()` で添付できる。
+
+```ts
+const image = await page.screenshot({ fullPage: true });
+
+await test.info().attach('SCR-002 管理者ホーム', {
+  body: image,
+  contentType: 'image/png',
+});
+```
+
+### Trace・動画・失敗時画像
+
+障害調査と証跡のため、必要に応じて `playwright.config.ts` で次を有効にする。
+
+```ts
+use: {
+  trace: 'on-first-retry',
+  screenshot: 'only-on-failure',
+  video: 'retain-on-failure',
+}
+```
+
+操作マニュアル掲載用画像は `only-on-failure` に依存せず、テストコード内の `page.screenshot()` で取得する。
+
+### 秘密情報をテストへ直書きしない
+
+ID、PIN、パスワード、トークンは、公開リポジトリのテストコードへ直書きしない。
+
+PowerShell例:
+
+```powershell
+$env:TEST_STAFF_ID="3"
+$env:TEST_STAFF_PIN="********"
+npx playwright test --project=chromium --headed
+```
+
+テストコード:
+
+```ts
+const staffId = process.env.TEST_STAFF_ID;
+const staffPin = process.env.TEST_STAFF_PIN;
+
+if (!staffId || !staffPin) {
+  throw new Error('TEST_STAFF_ID / TEST_STAFF_PIN が未設定です');
+}
+```
+
+認証状態を保存する場合、`playwright/.auth/` 等を `.gitignore` に追加し、認証情報をコミットしない。
+
+### Network・Consoleも証跡として確認する
+
+画面が表示されただけで成功とせず、必要な業務ではAPI成功も確認する。
+
+例:
+
+```ts
+const responsePromise = page.waitForResponse(response =>
+  response.url().includes('/api/') && response.request().method() === 'POST'
+);
+
+await page.getByRole('button', { name: '保存' }).click();
+const response = await responsePromise;
+expect(response.ok()).toBeTruthy();
+```
+
+UI Modeの `Network` で、対象APIが `2xx` になっていることを確認する。`401`、`403`、`404`、`422`、`500` がある場合は原因を確認する。
+
+Consoleエラーも確認し、重大なJavaScriptエラーがある状態で「正常」と判定しない。
+
+### Playwrightで自動化しない対象
+
+次は、Playwrightのブラウザ自動操作だけで「実機確認済み」としない。
+
+- iPhone Safari固有挙動
+- PWAのホーム画面追加
+- 実機カメラ
+- 実QR読取
+- 実GPS精度
+- iOS／Androidの通知
+- OS権限ダイアログ
+- Bluetooth、NFC等の端末機能
+
+代替文字列、モックGPS、APIモックでテストした場合は、`代替テスト` と明記する。
+
+### Playwrightテストの完成条件
+
+操作マニュアル用テストは次を満たす。
+
+- [ ] 対象シナリオの開始条件が明確である
+- [ ] 1操作1 `test.step()` を基本としている
+- [ ] Locatorが実画面のラベル・役割に基づいている
+- [ ] 重要操作後に `expect()` で結果を確認している
+- [ ] マニュアル掲載用キャプチャを明示的に保存している
+- [ ] キャプチャ名に画面ID・手順・状態が含まれる
+- [ ] UI Modeで操作前後、Locator、ログ、エラー、Networkを確認した
+- [ ] テスト結果がPassである
+- [ ] PIN、パスワード、トークン等をコードへ直書きしていない
+- [ ] 危険操作を本番環境で無断実行していない
+- [ ] 実機固有項目をPlaywrightだけで確認済み扱いにしていない
+
 ### 5. マスキングする
 
 マスキングは、キャプチャ後の画像に非可逆で行う。半透明、ぼかしだけ、上に図形を重ねただけの状態で元情報を残さない。
@@ -274,4 +647,3 @@ README、ルーティング、メニュー、画面設計、権限定義、テ�
 5. 安全に取得する手順
 
 取得できた範囲の暫定版を作る場合は、表紙と画面網羅表に `暫定版・実画面未取得あり` と明記する。
-
